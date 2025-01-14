@@ -1,5 +1,5 @@
 # Base stage for shared environment setup
-FROM node:20-alpine as base
+FROM node:20-alpine3.20 as base
 RUN apk add --no-cache g++ make python3
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -33,4 +33,4 @@ COPY --from=production-deps /app/node_modules node_modules
 COPY --from=build /app/dist dist
 
 EXPOSE 5000
-CMD ["node", "dist/server.js"]
+CMD ["node", "dist/start/server.js"]

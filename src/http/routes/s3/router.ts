@@ -2,7 +2,7 @@ import { FastifyRequest } from 'fastify'
 import { FromSchema, JSONSchema } from 'json-schema-to-ts'
 import type { ValidateFunction } from 'ajv'
 import Ajv from 'ajv'
-import { Storage } from '../../../storage'
+import { Storage } from '@storage/storage'
 import { default as CreateBucket } from './commands/create-bucket'
 import { default as ListBucket } from './commands/list-buckets'
 import { default as ListObjects } from './commands/list-objects'
@@ -11,6 +11,7 @@ import { default as CompleteMultipartUpload } from './commands/complete-multipar
 import { default as DeleteBucket } from './commands/delete-bucket'
 import { default as CreateMultipartUpload } from './commands/create-multipart-upload'
 import { default as UploadPart } from './commands/upload-part'
+import { default as PutObject } from './commands/put-object'
 import { default as HeadObject } from './commands/head-object'
 import { default as DeleteObject } from './commands/delete-object'
 import { default as AbortMultiPartUpload } from './commands/abort-multipart-upload'
@@ -22,7 +23,13 @@ import { default as ListParts } from './commands/list-parts'
 import { default as UploadPartCopy } from './commands/upload-part-copy'
 import { JTDDataType } from 'ajv/dist/jtd'
 
-export type Context = { storage: Storage; tenantId: string; owner?: string; req: FastifyRequest }
+export type Context = {
+  storage: Storage
+  tenantId: string
+  owner?: string
+  req: FastifyRequest
+  signals: { body: AbortSignal; response: AbortSignal }
+}
 export type S3Router = Router<Context>
 
 const s3Commands = [
@@ -34,6 +41,7 @@ const s3Commands = [
   CompleteMultipartUpload,
   CreateMultipartUpload,
   UploadPart,
+  PutObject,
   AbortMultiPartUpload,
   ListMultipartUploads,
   DeleteObject,
@@ -99,12 +107,14 @@ type Route<S extends Schema, Context> = {
   handler?: Handler<S, Context>
   schema: S
   disableContentTypeParser?: boolean
+  acceptMultiformData?: boolean
   operation: string
   compiledSchema: () => ValidateFunction<JTDDataType<S>>
 }
 
 interface RouteOptions<S extends JSONSchema> {
   disableContentTypeParser?: boolean
+  acceptMultiformData?: boolean
   operation: string
   schema: S
 }
@@ -127,7 +137,7 @@ export class Router<Context = unknown, S extends Schema = Schema> {
     options: RouteOptions<R>,
     handler: Handler<R, Context>
   ) {
-    const { query, headers } = this.parseQueryString(url)
+    const { query, headers } = this.parseRequestInfo(url)
     const normalizedUrl = url.split('?')[0].split('|')[0]
 
     const existingPath = this._routes.get(normalizedUrl)
@@ -138,13 +148,13 @@ export class Router<Context = unknown, S extends Schema = Schema> {
       Body?: JSONSchema
     } = {}
 
-    const { schema, disableContentTypeParser, operation } = options
+    const { schema, disableContentTypeParser, acceptMultiformData, operation } = options
 
     if (schema.Params) {
       schemaToCompile.Params = schema.Params
     }
     if (schema.Body) {
-      schemaToCompile.Body
+      schemaToCompile.Body = schema.Body
     }
     if (schema.Headers) {
       schemaToCompile.Headers = schema.Headers
@@ -154,10 +164,25 @@ export class Router<Context = unknown, S extends Schema = Schema> {
       schemaToCompile.Querystring = schema.Querystring
     }
 
+    // If any of the keys has a required property, then the top level object is also required
+    const required = Object.keys(schemaToCompile).map((key) => {
+      const k = key as keyof typeof schemaToCompile
+      const schemaObj = schemaToCompile[k]
+
+      if (typeof schemaObj === 'boolean') {
+        return
+      }
+
+      if (schemaObj?.required && schemaObj.required.length > 0) {
+        return key as string
+      }
+    })
+
     this.ajv.addSchema(
       {
         type: 'object',
         properties: schemaToCompile,
+        required: required.filter(Boolean),
       },
       method + url
     )
@@ -170,7 +195,8 @@ export class Router<Context = unknown, S extends Schema = Schema> {
       schema: schema,
       compiledSchema: () => this.ajv.getSchema(method + url) as ValidateFunction<JTDDataType<R>>,
       handler: handler as Handler<R, Context>,
-      disableContentTypeParser: disableContentTypeParser,
+      disableContentTypeParser,
+      acceptMultiformData,
       operation,
     } as const
 
@@ -208,7 +234,7 @@ export class Router<Context = unknown, S extends Schema = Schema> {
     return { key, value }
   }
 
-  parseQueryString(queryString: string) {
+  parseRequestInfo(queryString: string) {
     const queries = queryString.replace(/\|.*/, '').split('?')[1]?.split('&') || []
     const headers = queryString.split('|').splice(1)
 
@@ -241,7 +267,16 @@ export class Router<Context = unknown, S extends Schema = Schema> {
       return headers.length === 0
     }
 
-    return headers.every((header) => received[header] !== undefined)
+    return headers.every((header) => {
+      const headerParts = header.split('=')
+      const headerName = headerParts[0]
+      const headerValue = headerParts[1]
+
+      const matchHeaderName = received[headerName] !== undefined
+      const matchHeaderValue = headerValue ? received[headerName].startsWith(headerValue) : true
+
+      return matchHeaderName && matchHeaderValue
+    })
   }
 
   protected matchQueryString(
@@ -270,4 +305,33 @@ export class Router<Context = unknown, S extends Schema = Schema> {
     }
     return false
   }
+}
+
+/**
+ * Given a JSONSchema Definition, it returns dotted paths of all array properties
+ * @param schemas
+ */
+export function findArrayPathsInSchemas(schemas: JSONSchema[]): string[] {
+  const arrayPaths: string[] = []
+
+  function traverse(schema: JSONSchema, currentPath = ''): void {
+    if (typeof schema === 'boolean') {
+      return
+    }
+
+    if (schema.type === 'array') {
+      arrayPaths.push(currentPath)
+    }
+
+    if (schema.properties) {
+      for (const key in schema.properties) {
+        const nextSchema = schema.properties[key]
+        traverse(nextSchema, currentPath ? `${currentPath}.${key}` : key)
+      }
+    }
+  }
+
+  schemas.forEach((schema) => traverse(schema))
+
+  return arrayPaths
 }

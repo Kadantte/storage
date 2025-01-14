@@ -1,7 +1,8 @@
 import { FastifyInstance, RequestGenericInterface } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
-import { createDefaultSchema } from '../../generic-routes'
+import { createDefaultSchema } from '../../routes-helper'
 import { ROUTE_OPERATIONS } from '../operations'
+import fastifyMultipart from '@fastify/multipart'
 
 const createObjectParamsSchema = {
   type: 'object',
@@ -43,6 +44,14 @@ export default async function routes(fastify: FastifyInstance) {
     tags: ['object'],
   })
 
+  fastify.register(fastifyMultipart, {
+    limits: {
+      fields: 10,
+      files: 1,
+    },
+    throwFileSizeLimit: false,
+  })
+
   fastify.addContentTypeParser(
     ['application/json', 'text/plain'],
     function (request, payload, done) {
@@ -63,13 +72,14 @@ export default async function routes(fastify: FastifyInstance) {
       const objectName = request.params['*']
 
       const isUpsert = request.headers['x-upsert'] === 'true'
-      const owner = request.owner as string
+      const owner = request.owner
 
       const { objectMetadata, path, id } = await request.storage
         .from(bucketName)
-        .uploadNewObject(request, {
+        .uploadFromRequest(request, {
           objectName,
-          owner,
+          signal: request.signals.body.signal,
+          owner: owner,
           isUpsert,
         })
 

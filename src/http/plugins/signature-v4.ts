@@ -1,10 +1,12 @@
 import { FastifyInstance, FastifyRequest } from 'fastify'
 import fastifyPlugin from 'fastify-plugin'
-import { getS3CredentialsByAccessKey, getTenantConfig } from '../../database'
-import { ClientSignature, SignatureV4 } from '../../storage/protocols/s3'
-import { ERRORS } from '../../storage'
-import { signJWT, verifyJWT } from '../../auth'
+import { getS3CredentialsByAccessKey, getTenantConfig } from '@internal/database'
+import { ClientSignature, SignatureV4 } from '@storage/protocols/s3'
+import { signJWT, verifyJWT } from '@internal/auth'
+import { ERRORS } from '@internal/errors'
+
 import { getConfig } from '../../config'
+import { MultipartFile } from '@fastify/multipart'
 
 const {
   anonKey,
@@ -13,96 +15,139 @@ const {
   serviceKey,
   storageS3Region,
   isMultitenant,
+  requestAllowXForwardedPrefix,
   s3ProtocolPrefix,
   s3ProtocolAllowForwardedHeader,
   s3ProtocolEnforceRegion,
   s3ProtocolAccessKeyId,
   s3ProtocolAccessKeySecret,
+  s3ProtocolNonCanonicalHostHeader,
 } = getConfig()
 
-export const signatureV4 = fastifyPlugin(async function (fastify: FastifyInstance) {
-  fastify.addHook('preHandler', async (request: FastifyRequest) => {
-    if (typeof request.headers.authorization !== 'string') {
-      throw ERRORS.AccessDenied('Missing authorization header')
-    }
+type AWSRequest = FastifyRequest<{ Querystring: { 'X-Amz-Credential'?: string } }>
 
-    const clientCredentials = SignatureV4.parseAuthorizationHeader(request.headers.authorization)
+declare module 'fastify' {
+  interface FastifyRequest {
+    multiPartFileStream?: MultipartFile
+  }
+}
 
-    const sessionToken = request.headers['x-amz-security-token'] as string | undefined
+export const signatureV4 = fastifyPlugin(
+  async function (fastify: FastifyInstance) {
+    fastify.addHook('preHandler', async (request: AWSRequest) => {
+      const clientSignature = await extractSignature(request)
 
-    const {
-      signature: signatureV4,
-      claims,
-      token,
-    } = await createSignature(request.tenantId, clientCredentials, {
-      sessionToken: sessionToken,
+      const sessionToken = clientSignature.sessionToken
+
+      const {
+        signature: signatureV4,
+        claims,
+        token,
+      } = await createServerSignature(request.tenantId, clientSignature)
+
+      let storagePrefix = s3ProtocolPrefix
+      if (
+        requestAllowXForwardedPrefix &&
+        typeof request.headers['x-forwarded-prefix'] === 'string'
+      ) {
+        storagePrefix = request.headers['x-forwarded-prefix']
+      }
+
+      const isVerified = signatureV4.verify(clientSignature, {
+        url: request.url,
+        body: request.body as string | ReadableStream | Buffer,
+        headers: request.headers as Record<string, string | string[]>,
+        method: request.method,
+        query: request.query as Record<string, string>,
+        prefix: storagePrefix,
+      })
+
+      if (!isVerified && !sessionToken) {
+        throw ERRORS.SignatureDoesNotMatch(
+          'The request signature we calculated does not match the signature you provided. Check your key and signing method.'
+        )
+      }
+
+      if (!isVerified && sessionToken) {
+        throw ERRORS.SignatureDoesNotMatch(
+          'The request signature we calculated does not match the signature you provided, Check your credentials. ' +
+            'The session token should be a valid JWT token'
+        )
+      }
+
+      const jwtSecrets = {
+        jwtSecret: jwtSecret,
+        jwks: jwtJWKS,
+      }
+
+      if (isMultitenant) {
+        const tenant = await getTenantConfig(request.tenantId)
+        jwtSecrets.jwtSecret = tenant.jwtSecret
+        jwtSecrets.jwks = tenant.jwks || undefined
+      }
+
+      if (token) {
+        const payload = await verifyJWT(token, jwtSecrets.jwtSecret, jwtSecrets.jwks)
+        request.jwt = token
+        request.jwtPayload = payload
+        request.owner = payload.sub
+        return
+      }
+
+      if (!claims) {
+        throw ERRORS.AccessDenied('Missing claims')
+      }
+
+      const jwt = await signJWT(claims, jwtSecrets.jwtSecret, '5m')
+
+      request.jwt = jwt
+      request.jwtPayload = claims
+      request.owner = claims.sub
+    })
+  },
+  { name: 'auth-signature-v4' }
+)
+
+async function extractSignature(req: AWSRequest) {
+  if (typeof req.headers.authorization === 'string') {
+    return SignatureV4.parseAuthorizationHeader(req.headers)
+  }
+
+  if (typeof req.query['X-Amz-Credential'] === 'string') {
+    return SignatureV4.parseQuerySignature(req.query)
+  }
+
+  if (typeof req.isMultipart === 'function' && req.isMultipart()) {
+    const formData = new FormData()
+    const data = await req.file({
+      limits: {
+        fields: 20,
+        files: 1,
+        fileSize: 5 * (1024 * 1024 * 1024),
+      },
     })
 
-    const isVerified = signatureV4.verify({
-      url: request.url,
-      body: request.body as string | ReadableStream | Buffer,
-      headers: request.headers as Record<string, string | string[]>,
-      method: request.method,
-      query: request.query as Record<string, string>,
-      prefix: s3ProtocolPrefix,
-      credentials: clientCredentials.credentials,
-      signature: clientCredentials.signature,
-      signedHeaders: clientCredentials.signedHeaders,
-    })
-
-    if (!isVerified && !sessionToken) {
-      throw ERRORS.SignatureDoesNotMatch(
-        'The request signature we calculated does not match the signature you provided. Check your key and signing method.'
-      )
+    const fields = data?.fields
+    if (fields) {
+      for (const key in fields) {
+        if (fields.hasOwnProperty(key) && (fields[key] as any).fieldname !== 'file') {
+          formData.append(key, (fields[key] as any).value)
+        }
+      }
     }
+    // Assign the multipartFileStream for later use
+    req.multiPartFileStream = data
+    return SignatureV4.parseMultipartSignature(formData)
+  }
 
-    if (!isVerified && sessionToken) {
-      throw ERRORS.SignatureDoesNotMatch(
-        'The request signature we calculated does not match the signature you provided, Check your credentials. ' +
-          'The session token should be a valid JWT token'
-      )
-    }
+  throw ERRORS.AccessDenied('Missing signature')
+}
 
-    const jwtSecrets = {
-      jwtSecret: jwtSecret,
-      jwks: jwtJWKS,
-    }
-
-    if (isMultitenant) {
-      const tenant = await getTenantConfig(request.tenantId)
-      jwtSecrets.jwtSecret = tenant.jwtSecret
-      jwtSecrets.jwks = tenant.jwks || undefined
-    }
-
-    if (token) {
-      const payload = await verifyJWT(token, jwtSecrets.jwtSecret, jwtSecrets.jwks)
-      request.jwt = token
-      request.jwtPayload = payload
-      request.owner = payload.sub
-      return
-    }
-
-    if (!claims) {
-      throw ERRORS.AccessDenied('Missing claims')
-    }
-
-    const jwt = await signJWT(claims, jwtSecrets.jwtSecret, '5m')
-
-    request.jwt = jwt
-    request.jwtPayload = claims
-    request.owner = claims.sub
-  })
-})
-
-async function createSignature(
-  tenantId: string,
-  clientSignature: ClientSignature,
-  session?: { sessionToken?: string }
-) {
+async function createServerSignature(tenantId: string, clientSignature: ClientSignature) {
   const awsRegion = storageS3Region
   const awsService = 's3'
 
-  if (session?.sessionToken) {
+  if (clientSignature?.sessionToken) {
     const tenantAnonKey = isMultitenant ? (await getTenantConfig(tenantId)).anonKey : anonKey
 
     if (!tenantAnonKey) {
@@ -112,6 +157,7 @@ async function createSignature(
     const signature = new SignatureV4({
       enforceRegion: s3ProtocolEnforceRegion,
       allowForwardedHeader: s3ProtocolAllowForwardedHeader,
+      nonCanonicalForwardedHost: s3ProtocolNonCanonicalHostHeader,
       credentials: {
         accessKey: tenantId,
         secretKey: tenantAnonKey,
@@ -120,7 +166,7 @@ async function createSignature(
       },
     })
 
-    return { signature, claims: undefined, token: session.sessionToken }
+    return { signature, claims: undefined, token: clientSignature.sessionToken }
   }
 
   if (isMultitenant) {
@@ -132,6 +178,7 @@ async function createSignature(
     const signature = new SignatureV4({
       enforceRegion: s3ProtocolEnforceRegion,
       allowForwardedHeader: s3ProtocolAllowForwardedHeader,
+      nonCanonicalForwardedHost: s3ProtocolNonCanonicalHostHeader,
       credentials: {
         accessKey: credential.accessKey,
         secretKey: credential.secretKey,
@@ -152,6 +199,7 @@ async function createSignature(
   const signature = new SignatureV4({
     enforceRegion: s3ProtocolEnforceRegion,
     allowForwardedHeader: s3ProtocolAllowForwardedHeader,
+    nonCanonicalForwardedHost: s3ProtocolNonCanonicalHostHeader,
     credentials: {
       accessKey: s3ProtocolAccessKeyId,
       secretKey: s3ProtocolAccessKeySecret,

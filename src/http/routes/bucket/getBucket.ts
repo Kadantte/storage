@@ -1,8 +1,8 @@
 import { FastifyInstance } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
-import { createDefaultSchema } from '../../generic-routes'
-import { bucketSchema } from '../../../storage/schemas'
-import { AuthenticatedRequest } from '../../request'
+import { createDefaultSchema } from '../../routes-helper'
+import { bucketSchema } from '@storage/schemas'
+import { AuthenticatedRequest } from '../../types'
 import { ROUTE_OPERATIONS } from '../operations'
 
 const getBucketParamsSchema = {
@@ -41,7 +41,7 @@ export default async function routes(fastify: FastifyInstance) {
         'id, name, owner, public, created_at, updated_at, file_size_limit, allowed_mime_types'
       )
 
-      response.send(results)
+      return response.send(results)
     }
   )
 }

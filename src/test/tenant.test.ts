@@ -1,7 +1,7 @@
 'use strict'
 import dotenv from 'dotenv'
-import * as migrate from '../database/migrations/migrate'
-import { multitenantKnex } from '../database/multitenant-db'
+import * as migrate from '../internal/database/migrations/migrate'
+import { multitenantKnex } from '../internal/database/multitenant-db'
 import { adminApp } from './common'
 
 dotenv.config({ path: '.env.test' })
@@ -16,12 +16,18 @@ const payload = {
   serviceKey: 'd',
   jwks: { keys: [] },
   migrationStatus: 'COMPLETED',
-  migrationVersion: 'operation-function',
+  migrationVersion: 'custom-metadata',
+  tracingMode: 'basic',
   features: {
     imageTransformation: {
       enabled: true,
+      maxResolution: null,
+    },
+    s3Protocol: {
+      enabled: true,
     },
   },
+  disableEvents: null,
 }
 
 const payload2 = {
@@ -34,12 +40,18 @@ const payload2 = {
   serviceKey: 'h',
   jwks: null,
   migrationStatus: 'COMPLETED',
-  migrationVersion: 'operation-function',
+  migrationVersion: 'custom-metadata',
+  tracingMode: 'basic',
   features: {
     imageTransformation: {
       enabled: false,
+      maxResolution: null,
+    },
+    s3Protocol: {
+      enabled: true,
     },
   },
+  disableEvents: null,
 }
 
 beforeAll(async () => {

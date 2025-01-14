@@ -1,6 +1,7 @@
 import { Bucket, S3MultipartUpload, Obj, S3PartUpload } from '../schemas'
 import { ObjectMetadata } from '../backend'
-import { TenantConnection } from '../../database/connection'
+import { TenantConnection } from '@internal/database'
+import { DBMigration } from '@internal/database/migrations'
 
 export interface SearchObjectOption {
   search?: string
@@ -36,6 +37,7 @@ export interface TransactionOptions {
 export interface DatabaseOptions<TNX> {
   tenantId: string
   reqId?: string
+  latestMigration?: keyof typeof DBMigration
   host: string
   tnx?: TNX
   parentTnx?: TNX
@@ -101,7 +103,12 @@ export interface Database {
 
   listBuckets(columns: string): Promise<Bucket[]>
   mustLockObject(bucketId: string, objectName: string, version?: string): Promise<boolean>
-  waitObjectLock(bucketId: string, objectName: string, version?: string): Promise<boolean>
+  waitObjectLock(
+    bucketId: string,
+    objectName: string,
+    version?: string,
+    opts?: { timeout?: number }
+  ): Promise<boolean>
 
   updateBucket(
     bucketId: string,
@@ -109,16 +116,16 @@ export interface Database {
   ): Promise<void>
 
   upsertObject(
-    data: Pick<Obj, 'name' | 'owner' | 'bucket_id' | 'metadata' | 'version'>
+    data: Pick<Obj, 'name' | 'owner' | 'bucket_id' | 'metadata' | 'version' | 'user_metadata'>
   ): Promise<Obj>
   updateObject(
     bucketId: string,
     name: string,
-    data: Pick<Obj, 'owner' | 'metadata' | 'version' | 'name' | 'bucket_id'>
+    data: Pick<Obj, 'owner' | 'metadata' | 'version' | 'name' | 'bucket_id' | 'user_metadata'>
   ): Promise<Obj>
 
   createObject(
-    data: Pick<Obj, 'name' | 'owner' | 'bucket_id' | 'metadata' | 'version'>
+    data: Pick<Obj, 'name' | 'owner' | 'bucket_id' | 'metadata' | 'version' | 'user_metadata'>
   ): Promise<Obj>
 
   deleteObject(bucketId: string, objectName: string, version?: string): Promise<Obj | undefined>
@@ -148,7 +155,8 @@ export interface Database {
     objectName: string,
     version: string,
     signature: string,
-    owner?: string
+    owner?: string,
+    metadata?: Record<string, string | null>
   ): Promise<S3MultipartUpload>
 
   findMultipartUpload(

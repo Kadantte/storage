@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
 import { ROUTE_OPERATIONS } from '../operations'
+import fastifyMultipart from '@fastify/multipart'
 
 const uploadSignedObjectParamsSchema = {
   type: 'object',
@@ -43,6 +44,14 @@ interface UploadSignedObjectRequestInterface {
 export default async function routes(fastify: FastifyInstance) {
   const summary = 'Uploads an object via a presigned URL'
 
+  fastify.register(fastifyMultipart, {
+    limits: {
+      fields: 10,
+      files: 1,
+    },
+    throwFileSizeLimit: false,
+  })
+
   fastify.addContentTypeParser(
     ['application/json', 'text/plain'],
     function (request, payload, done) {
@@ -81,10 +90,11 @@ export default async function routes(fastify: FastifyInstance) {
       const { objectMetadata, path } = await request.storage
         .asSuperUser()
         .from(bucketName)
-        .uploadNewObject(request, {
+        .uploadFromRequest(request, {
           owner,
           objectName,
           isUpsert: upsert,
+          signal: request.signals.body.signal,
         })
 
       return response.status(objectMetadata?.httpStatusCode ?? 200).send({

@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
-import { ErrorCode, isRenderableError } from '../storage'
 import { FastifyError } from '@fastify/error'
 import { DatabaseError } from 'pg'
+import { ErrorCode, isRenderableError } from '@internal/errors'
 
 /**
  * The global error handler for all the uncaught exceptions within a request.
@@ -43,6 +43,18 @@ export const setErrorHandler = (app: FastifyInstance) => {
         ? 500
         : 400
 
+      if (renderableError.code === ErrorCode.AbortedTerminate) {
+        reply.header('Connection', 'close')
+
+        reply.raw.once('finish', () => {
+          setTimeout(() => {
+            if (!request.raw.closed) {
+              request.raw.destroy()
+            }
+          }, 3000)
+        })
+      }
+
       return reply.status(statusCode).send({
         ...renderableError,
         error: error.error || renderableError.code,
@@ -59,7 +71,7 @@ export const setErrorHandler = (app: FastifyInstance) => {
       })
     }
 
-    reply.status(500).send({
+    return reply.status(500).send({
       statusCode: '500',
       error: 'Internal',
       message: 'Internal Server Error',

@@ -2,27 +2,25 @@ import dotenv from 'dotenv'
 import path from 'path'
 dotenv.config({ path: path.resolve(__dirname, '..', '..', '.env.test') })
 
-import { getPostgresConnection } from '../database'
-import { getConfig } from '../config'
-import { StorageKnexDB } from '../storage/database'
+import fs from 'fs'
+import { FastifyInstance } from 'fastify'
 import { randomUUID } from 'crypto'
 import * as tus from 'tus-js-client'
-import fs from 'fs'
-import app from '../app'
-import { FastifyInstance } from 'fastify'
-import { isS3Error, Storage } from '../storage'
-import { createStorageBackend } from '../storage/backend'
-import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3'
-import { logger } from '../monitoring'
 import { DetailedError } from 'tus-js-client'
-import { getServiceKeyUser } from '../database/tenant'
+import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3'
+
+import { logger } from '@internal/monitoring'
+import { getServiceKeyUser, getPostgresConnection } from '@internal/database'
+import { getConfig } from '../config'
+import app from '../app'
 import { checkBucketExists } from './common'
+import { Storage, backends, StorageKnexDB } from '../storage'
 
 const { serviceKey, tenantId, storageS3Bucket, storageBackendType } = getConfig()
 const oneChunkFile = fs.createReadStream(path.resolve(__dirname, 'assets', 'sadcat.jpg'))
 const localServerAddress = 'http://127.0.0.1:8999'
 
-const backend = createStorageBackend(storageBackendType)
+const backend = backends.createStorageBackend(storageBackendType)
 const client = backend.client
 
 describe('Tus multipart', () => {
@@ -97,6 +95,10 @@ describe('Tus multipart', () => {
           objectName: objectName,
           contentType: 'image/jpeg',
           cacheControl: '3600',
+          metadata: JSON.stringify({
+            test1: 'test1',
+            test2: 'test2',
+          }),
         },
         onError: function (error) {
           console.log('Failed because: ' + error)
@@ -126,6 +128,10 @@ describe('Tus multipart', () => {
         lastModified: expect.any(String),
         mimetype: 'image/jpeg',
         size: 29526,
+      },
+      user_metadata: {
+        test1: 'test1',
+        test2: 'test2',
       },
       name: objectName,
       owner: null,
@@ -261,6 +267,10 @@ describe('Tus multipart', () => {
             objectName: objectName,
             contentType: 'image/jpeg',
             cacheControl: '3600',
+            metadata: JSON.stringify({
+              test1: 'test1',
+              test3: 'test3',
+            }),
           },
           onError: function (error) {
             console.log('Failed because: ' + error)
@@ -290,6 +300,10 @@ describe('Tus multipart', () => {
           lastModified: expect.any(String),
           mimetype: 'image/jpeg',
           size: 29526,
+        },
+        user_metadata: {
+          test1: 'test1',
+          test3: 'test3',
         },
         name: objectName,
         owner: null,
@@ -356,6 +370,7 @@ describe('Tus multipart', () => {
           mimetype: 'image/jpeg',
           size: 29526,
         },
+        user_metadata: null,
         name: objectName,
         owner: null,
         owner_id: 'some-owner-id',
