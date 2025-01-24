@@ -2,13 +2,15 @@ import http from 'http'
 import { BaseLogger } from 'pino'
 import { Upload } from '@tus/server'
 import { randomUUID } from 'crypto'
-import { ERRORS, isRenderableError, Storage } from '../../../storage'
-import { getConfig } from '../../../config'
-import { Uploader } from '../../../storage/uploader'
-import { TenantConnection } from '../../../database'
-import { UploadId } from '../../../storage/protocols/tus'
+import { TenantConnection } from '@internal/database'
+import { ERRORS, isRenderableError } from '@internal/errors'
+import { Storage } from '@storage/storage'
+import { Uploader, validateMimeType } from '@storage/uploader'
+import { UploadId } from '@storage/protocols/tus'
 
-const { storageS3Bucket, tusPath } = getConfig()
+import { getConfig } from '../../../config'
+
+const { storageS3Bucket, tusPath, requestAllowXForwardedPrefix } = getConfig()
 const reExtractFileID = /([^/]+)\/?$/
 
 export const SIGNED_URL_SUFFIX = '/sign'
@@ -85,10 +87,32 @@ export function generateUrl(
   req: http.IncomingMessage,
   { proto, host, path, id }: { proto: string; host: string; path: string; id: string }
 ) {
+  if (!req.url) {
+    throw ERRORS.InvalidParameter('url')
+  }
   proto = process.env.NODE_ENV === 'production' ? 'https' : proto
 
+  let basePath = path
+
+  const forwardedPath = req.headers['x-forwarded-prefix']
+  if (requestAllowXForwardedPrefix && typeof forwardedPath === 'string') {
+    basePath = forwardedPath + path
+  }
+
   const isSigned = req.url?.endsWith(SIGNED_URL_SUFFIX)
-  const fullPath = isSigned ? `${path}${SIGNED_URL_SUFFIX}` : path
+  const fullPath = isSigned ? `${basePath}${SIGNED_URL_SUFFIX}` : basePath
+
+  if (req.headers['x-forwarded-host']) {
+    const port = req.headers['x-forwarded-port']
+
+    if (typeof port === 'string' && port && !['443', '80'].includes(port)) {
+      if (!host.includes(':')) {
+        host += `:${req.headers['x-forwarded-port']}`
+      } else {
+        host = host.replace(/:\d+$/, `:${req.headers['x-forwarded-port']}`)
+      }
+    }
+  }
 
   // remove the tenant-id from the url, since we'll be using the tenant-id from the request
   id = id.split('/').slice(1).join('/')
@@ -152,7 +176,7 @@ export async function onCreate(
   rawReq: http.IncomingMessage,
   res: http.ServerResponse,
   upload: Upload
-): Promise<http.ServerResponse> {
+): Promise<{ res: http.ServerResponse; metadata?: Upload['metadata'] }> {
   const uploadID = UploadId.fromString(upload.id)
 
   const req = rawReq as MultiPartRequest
@@ -162,19 +186,21 @@ export async function onCreate(
     .asSuperUser()
     .findBucket(uploadID.bucket, 'id, file_size_limit, allowed_mime_types')
 
-  const uploader = new Uploader(storage.backend, storage.db)
-
-  if (upload.metadata && /^-?\d+$/.test(upload.metadata.cacheControl || '')) {
-    upload.metadata.cacheControl = `max-age=${upload.metadata.cacheControl}`
-  } else if (upload.metadata) {
-    upload.metadata.cacheControl = 'no-cache'
+  const metadata = {
+    ...(upload.metadata ? upload.metadata : {}),
   }
 
-  if (upload.metadata?.contentType && bucket.allowed_mime_types) {
-    uploader.validateMimeType(upload.metadata.contentType, bucket.allowed_mime_types)
+  if (/^-?\d+$/.test(metadata.cacheControl || '')) {
+    metadata.cacheControl = `max-age=${metadata.cacheControl}`
+  } else if (metadata) {
+    metadata.cacheControl = 'no-cache'
   }
 
-  return res
+  if (metadata?.contentType && bucket.allowed_mime_types) {
+    validateMimeType(metadata.contentType, bucket.allowed_mime_types)
+  }
+
+  return { res, metadata }
 }
 
 /**
@@ -197,6 +223,14 @@ export async function onUploadFinish(
     )
 
     const uploader = new Uploader(req.upload.storage.backend, req.upload.storage.db)
+    let customMd: undefined | Record<string, string> = undefined
+    if (upload.metadata?.metadata) {
+      try {
+        customMd = JSON.parse(upload.metadata.metadata)
+      } catch (e) {
+        // no-op
+      }
+    }
 
     await uploader.completeUpload({
       version: resourceId.version,
@@ -206,6 +240,7 @@ export async function onUploadFinish(
       isUpsert: req.upload.isUpsert,
       uploadType: 'resumable',
       owner: req.upload.owner,
+      userMetadata: customMd,
     })
 
     res.setHeader('Tus-Complete', '1')

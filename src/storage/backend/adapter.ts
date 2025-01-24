@@ -1,4 +1,4 @@
-import stream, { Readable } from 'stream'
+import { Readable } from 'stream'
 import { getConfig } from '../../config'
 
 /**
@@ -15,6 +15,7 @@ export interface BrowserCacheHeaders {
  */
 export type ObjectResponse = {
   metadata: ObjectMetadata
+  httpStatusCode: number
   body?: ReadableStream<any> | Readable | Blob | Buffer
 }
 
@@ -29,7 +30,7 @@ export type ObjectMetadata = {
   lastModified?: Date
   eTag: string
   contentRange?: string
-  httpStatusCode: number
+  httpStatusCode?: number
 }
 
 export type UploadPart = {
@@ -51,6 +52,19 @@ export abstract class StorageBackendAdapter {
     this.client = null
   }
 
+  async list(
+    bucket: string,
+    options?: {
+      prefix?: string
+      delimiter?: string
+      nextToken?: string
+      startAfter?: string
+      beforeDate?: Date
+    }
+  ): Promise<{ keys: { name: string; size: number }[]; nextToken?: string }> {
+    throw new Error('list not implemented')
+  }
+
   /**
    * Gets an object body and metadata
    * @param bucketName
@@ -61,7 +75,8 @@ export abstract class StorageBackendAdapter {
     bucketName: string,
     key: string,
     version: string | undefined,
-    headers?: BrowserCacheHeaders
+    headers?: BrowserCacheHeaders,
+    signal?: AbortSignal
   ): Promise<ObjectResponse> {
     throw new Error('getObject not implemented')
   }
@@ -80,7 +95,8 @@ export abstract class StorageBackendAdapter {
     version: string | undefined,
     body: NodeJS.ReadableStream,
     contentType: string,
-    cacheControl: string
+    cacheControl: string,
+    signal?: AbortSignal
   ): Promise<ObjectMetadata> {
     throw new Error('uploadObject not implemented')
   }
@@ -102,6 +118,7 @@ export abstract class StorageBackendAdapter {
    * @param version
    * @param destination
    * @param destinationVersion
+   * @param metadata
    * @param conditions
    */
   async copyObject(
@@ -110,6 +127,7 @@ export abstract class StorageBackendAdapter {
     version: string | undefined,
     destination: string,
     destinationVersion: string | undefined,
+    metadata?: { cacheControl?: string; mimetype?: string },
     conditions?: {
       ifMatch?: string
       ifNoneMatch?: string
@@ -170,7 +188,8 @@ export abstract class StorageBackendAdapter {
     uploadId: string,
     partNumber: number,
     body?: string | Uint8Array | Buffer | Readable,
-    length?: number
+    length?: number,
+    signal?: AbortSignal
   ): Promise<{ ETag?: string }> {
     throw new Error('not implemented')
   }
@@ -211,6 +230,10 @@ export abstract class StorageBackendAdapter {
     bytes?: { fromByte: number; toByte: number }
   ): Promise<{ eTag?: string; lastModified?: Date }> {
     throw new Error('not implemented')
+  }
+
+  close(): void {
+    // do nothing
   }
 }
 

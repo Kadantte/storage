@@ -1,5 +1,4 @@
 import fastify, { FastifyInstance, FastifyServerOptions } from 'fastify'
-import fastifyMultipart from '@fastify/multipart'
 import fastifySwagger from '@fastify/swagger'
 import fastifySwaggerUi from '@fastify/swagger-ui'
 import { routes, schemas, plugins, setErrorHandler } from './http'
@@ -13,13 +12,6 @@ const { version, keepAliveTimeout, headersTimeout, isMultitenant } = getConfig()
 
 const build = (opts: buildOpts = {}): FastifyInstance => {
   const app = fastify(opts)
-  app.register(fastifyMultipart, {
-    limits: {
-      fields: 10,
-      files: 1,
-    },
-    throwFileSizeLimit: false,
-  })
 
   app.addContentTypeParser('*', function (request, payload, done) {
     done(null)
@@ -37,7 +29,7 @@ const build = (opts: buildOpts = {}): FastifyInstance => {
         info: {
           title: 'Supabase Storage API',
           description: 'API documentation for Supabase Storage',
-          version: '0.0.1',
+          version: version,
         },
         tags: [
           { name: 'object', description: 'Object end-points' },
@@ -45,10 +37,10 @@ const build = (opts: buildOpts = {}): FastifyInstance => {
           { name: 's3', description: 'S3 end-points' },
           { name: 'transformation', description: 'Image transformation' },
           { name: 'resumable', description: 'Resumable Upload end-points' },
-          { name: 'deprecated', description: 'Deprecated end-points' },
         ],
       },
     })
+
     app.register(fastifySwaggerUi, {
       routePrefix: '/documentation',
     })
@@ -58,9 +50,10 @@ const build = (opts: buildOpts = {}): FastifyInstance => {
   app.addSchema(schemas.authSchema)
   app.addSchema(schemas.errorSchema)
 
+  app.register(plugins.signals)
   app.register(plugins.tenantId)
   app.register(plugins.metrics({ enabledEndpoint: !isMultitenant }))
-  app.register(plugins.logTenantId)
+  app.register(plugins.tracing)
   app.register(plugins.logRequest({ excludeUrls: ['/status', '/metrics', '/health'] }))
   app.register(routes.tus, { prefix: 'upload/resumable' })
   app.register(routes.bucket, { prefix: 'bucket' })

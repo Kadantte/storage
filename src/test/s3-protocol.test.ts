@@ -11,6 +11,7 @@ import {
   GetBucketVersioningCommand,
   GetObjectCommand,
   HeadBucketCommand,
+  HeadObjectCommand,
   ListBucketsCommand,
   ListMultipartUploadsCommand,
   ListObjectsCommand,
@@ -28,15 +29,11 @@ import { FastifyInstance } from 'fastify'
 import { Upload } from '@aws-sdk/lib-storage'
 import { ReadableStreamBuffer } from 'stream-buffers'
 import { randomUUID } from 'crypto'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
+import axios from 'axios'
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post'
 
-const {
-  s3ProtocolAccessKeySecret,
-  s3ProtocolAccessKeyId,
-  storageS3Region,
-  tenantId,
-  anonKey,
-  serviceKey,
-} = getConfig()
+const { s3ProtocolAccessKeySecret, s3ProtocolAccessKeyId, storageS3Region } = getConfig()
 
 async function createBucket(client: S3Client, name?: string, publicRead = true) {
   let bucketName: string
@@ -76,7 +73,6 @@ describe('S3 Protocol', () => {
   describe('Bucket', () => {
     let testApp: FastifyInstance
     let client: S3Client
-    let clientMinio: S3Client
 
     beforeAll(async () => {
       testApp = app()
@@ -91,16 +87,20 @@ describe('S3 Protocol', () => {
         },
       })
 
-      clientMinio = new S3Client({
-        forcePathStyle: true,
-        region: storageS3Region,
-        logger: console,
-        endpoint: 'http://localhost:9000',
-        credentials: {
-          accessKeyId: 'supa-storage',
-          secretAccessKey: 'secret1234',
-        },
-      })
+      // clientMinio = new S3Client({
+      //   forcePathStyle: true,
+      //   region: storageS3Region,
+      //   logger: console,
+      //   endpoint: 'http://localhost:9000',
+      //   credentials: {
+      //     accessKeyId: 'supa-storage',
+      //     secretAccessKey: 'secret1234',
+      //   },
+      // })
+    })
+
+    afterEach(() => {
+      getConfig({ reload: true })
     })
 
     afterAll(async () => {
@@ -376,6 +376,65 @@ describe('S3 Protocol', () => {
       })
     })
 
+    describe('MultiPart Form Data Upload', () => {
+      it('can upload using multipart/form-data', async () => {
+        const bucketName = await createBucket(client)
+        const signedURL = await createPresignedPost(client, {
+          Bucket: bucketName,
+          Key: 'test.jpg',
+          Expires: 5000,
+          Fields: {
+            'Content-Type': 'image/jpg',
+            'X-Amz-Meta-Custom': 'meta-field',
+          },
+        })
+
+        const formData = new FormData()
+        Object.keys(signedURL.fields).forEach((key) => {
+          formData.set(key, signedURL.fields[key])
+        })
+
+        const data = Buffer.alloc(1024 * 1024)
+        formData.set('file', new Blob([data]), 'test.jpg')
+
+        const resp = await axios.post(signedURL.url, formData, {
+          validateStatus: () => true,
+        })
+
+        expect(resp.status).toBe(200)
+      })
+
+      it('prevent uploading files larger than the maxFileSize limit', async () => {
+        mergeConfig({
+          uploadFileSizeLimit: 1024 * 1024,
+        })
+        const bucketName = await createBucket(client)
+        const signedURL = await createPresignedPost(client, {
+          Bucket: bucketName,
+          Key: 'test.jpg',
+          Expires: 5000,
+          Fields: {
+            'Content-Type': 'image/jpg',
+          },
+        })
+
+        const formData = new FormData()
+        Object.keys(signedURL.fields).forEach((key) => {
+          formData.set(key, signedURL.fields[key])
+        })
+
+        const data = Buffer.alloc(1024 * 1024 * 2)
+        formData.set('file', new Blob([data]), 'test.jpg')
+
+        const resp = await axios.post(signedURL.url, formData, {
+          validateStatus: () => true,
+        })
+
+        expect(resp.status).toBe(413)
+        expect(resp.statusText).toBe('Payload Too Large')
+      })
+    })
+
     describe('MultiPartUpload', () => {
       it('creates a multi part upload', async () => {
         const bucketName = await createBucket(client)
@@ -501,6 +560,46 @@ describe('S3 Protocol', () => {
 
         const resp = await client.send(putObject)
         expect(resp.$metadata.httpStatusCode).toEqual(200)
+      })
+
+      it('upload a broken JSON body using putObject ', async () => {
+        const bucketName = await createBucket(client)
+
+        const putObject = new PutObjectCommand({
+          Bucket: bucketName,
+          Key: 'test-1-put-object.jpg',
+          ContentType: 'application/json',
+          Body: '{"hello": "world"', // (no-closing tag)
+        })
+
+        const resp = await client.send(putObject)
+        expect(resp.$metadata.httpStatusCode).toEqual(200)
+      })
+
+      it('upload a file using putObject with custom metadata', async () => {
+        const bucketName = await createBucket(client)
+
+        const putObject = new PutObjectCommand({
+          Bucket: bucketName,
+          Key: 'test-1-put-object.jpg',
+          Body: Buffer.alloc(1024 * 1024 * 12),
+          Metadata: {
+            nice: '1111',
+            test2: 'test3',
+          },
+        })
+
+        const resp = await client.send(putObject)
+        expect(resp.$metadata.httpStatusCode).toEqual(200)
+
+        const getObject = new HeadObjectCommand({
+          Bucket: bucketName,
+          Key: 'test-1-put-object.jpg',
+        })
+
+        const headResp = await client.send(getObject)
+        expect(headResp.Metadata?.nice).toEqual('1111')
+        expect(headResp.Metadata?.test2).toEqual('test3')
       })
 
       it('it will not allow to upload a file using putObject when exceeding maxFileSize', async () => {
@@ -707,6 +806,37 @@ describe('S3 Protocol', () => {
     })
 
     describe('DeleteObjectsCommand', () => {
+      it('can delete a single object', async () => {
+        const bucketName = await createBucket(client)
+        await Promise.all([uploadFile(client, bucketName, 'test-1.jpg', 1)])
+
+        const deleteObjectsCommand = new DeleteObjectsCommand({
+          Bucket: bucketName,
+          Delete: {
+            Objects: [
+              {
+                Key: 'test-1.jpg',
+              },
+            ],
+          },
+        })
+
+        const deleteResp = await client.send(deleteObjectsCommand)
+
+        expect(deleteResp.Deleted).toEqual([
+          {
+            Key: 'test-1.jpg',
+          },
+        ])
+
+        const listObjectsCommand = new ListObjectsV2Command({
+          Bucket: bucketName,
+        })
+
+        const resp = await client.send(listObjectsCommand)
+        expect(resp.Contents).toBe(undefined)
+      })
+
       it('can delete multiple objects', async () => {
         const bucketName = await createBucket(client)
         await Promise.all([
@@ -732,7 +862,70 @@ describe('S3 Protocol', () => {
           },
         })
 
-        await client.send(deleteObjectsCommand)
+        const deleteResp = await client.send(deleteObjectsCommand)
+
+        expect(deleteResp.Deleted).toEqual([
+          {
+            Key: 'test-1.jpg',
+          },
+          {
+            Key: 'test-2.jpg',
+          },
+          {
+            Key: 'test-3.jpg',
+          },
+        ])
+
+        const listObjectsCommand = new ListObjectsV2Command({
+          Bucket: bucketName,
+        })
+
+        const resp = await client.send(listObjectsCommand)
+        expect(resp.Contents).toBe(undefined)
+      })
+
+      it('try to delete multiple objects that dont exists', async () => {
+        const bucketName = await createBucket(client)
+
+        await uploadFile(client, bucketName, 'test-1.jpg', 1)
+
+        const deleteObjectsCommand = new DeleteObjectsCommand({
+          Bucket: bucketName,
+          Delete: {
+            Objects: [
+              {
+                Key: 'test-1.jpg',
+              },
+              {
+                Key: 'test-2.jpg',
+              },
+              {
+                Key: 'test-3.jpg',
+              },
+            ],
+          },
+        })
+
+        const deleteResp = await client.send(deleteObjectsCommand)
+        expect(deleteResp.Deleted).toEqual([
+          {
+            Key: 'test-1.jpg',
+          },
+        ])
+        expect(deleteResp.Errors).toEqual([
+          {
+            Key: 'test-2.jpg',
+            Code: 'AccessDenied',
+            Message:
+              "You do not have permission to delete this object or the object doesn't exists",
+          },
+          {
+            Key: 'test-3.jpg',
+            Code: 'AccessDenied',
+            Message:
+              "You do not have permission to delete this object or the object doesn't exists",
+          },
+        ])
 
         const listObjectsCommand = new ListObjectsV2Command({
           Bucket: bucketName,
@@ -771,6 +964,60 @@ describe('S3 Protocol', () => {
 
         const resp = await client.send(copyObjectCommand)
         expect(resp.CopyObjectResult?.ETag).toBeTruthy()
+      })
+
+      it('will copy an object overwriting the metadata', async () => {
+        const bucketName = await createBucket(client)
+        await uploadFile(client, bucketName, 'test-copy-1.jpg', 1)
+
+        const copyObjectCommand = new CopyObjectCommand({
+          Bucket: bucketName,
+          Key: 'test-copied-2.png',
+          CopySource: `${bucketName}/test-copy-1.jpg`,
+          ContentType: 'image/png',
+          CacheControl: 'max-age=2009',
+          MetadataDirective: 'REPLACE',
+        })
+
+        const resp = await client.send(copyObjectCommand)
+        expect(resp.CopyObjectResult?.ETag).toBeTruthy()
+
+        const headObjectCommand = new HeadObjectCommand({
+          Bucket: bucketName,
+          Key: 'test-copied-2.png',
+        })
+
+        const headObj = await client.send(headObjectCommand)
+        expect(headObj.ContentType).toBe('image/png')
+        expect(headObj.CacheControl).toBe('max-age=2009')
+      })
+
+      it('will allow copying an object in the same path, just altering its metadata', async () => {
+        const bucketName = await createBucket(client)
+        const fileName = 'test-copy-1.jpg'
+
+        await uploadFile(client, bucketName, fileName, 1)
+
+        const copyObjectCommand = new CopyObjectCommand({
+          Bucket: bucketName,
+          Key: fileName,
+          CopySource: `${bucketName}/${fileName}`,
+          ContentType: 'image/png',
+          CacheControl: 'max-age=2009',
+          MetadataDirective: 'REPLACE',
+        })
+
+        const resp = await client.send(copyObjectCommand)
+        expect(resp.CopyObjectResult?.ETag).toBeTruthy()
+
+        const headObjectCommand = new HeadObjectCommand({
+          Bucket: bucketName,
+          Key: fileName,
+        })
+
+        const headObj = await client.send(headObjectCommand)
+        expect(headObj.ContentType).toBe('image/png')
+        expect(headObj.CacheControl).toBe('max-age=2009')
       })
 
       it('will not be able to copy an object that doesnt exists', async () => {
@@ -1081,6 +1328,78 @@ describe('S3 Protocol', () => {
 
         const parts = await client.send(listPartsCmd)
         expect(parts.Parts?.length).toBe(1)
+      })
+    })
+
+    describe('S3 Presigned URL', () => {
+      it('can call a simple method with presigned url', async () => {
+        const bucket = await createBucket(client)
+        const bucketVersioningCommand = new GetBucketVersioningCommand({
+          Bucket: bucket,
+        })
+        const signedUrl = await getSignedUrl(client, bucketVersioningCommand, { expiresIn: 100 })
+        const resp = await fetch(signedUrl)
+
+        expect(resp.ok).toBeTruthy()
+      })
+
+      it('cannot request a presigned url if expired', async () => {
+        const bucket = await createBucket(client)
+        const bucketVersioningCommand = new GetBucketVersioningCommand({
+          Bucket: bucket,
+        })
+        const signedUrl = await getSignedUrl(client, bucketVersioningCommand, { expiresIn: 1 })
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        const resp = await fetch(signedUrl)
+
+        expect(resp.ok).toBeFalsy()
+        expect(resp.status).toBe(400)
+      })
+
+      it('can upload with presigned URL', async () => {
+        const bucket = await createBucket(client)
+        const key = 'test-1.jpg'
+        const body = Buffer.alloc(1024 * 1024 * 2)
+
+        const uploadUrl = await getSignedUrl(
+          client,
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: body,
+          }),
+          { expiresIn: 100 }
+        )
+
+        const resp = await fetch(uploadUrl, {
+          method: 'PUT',
+          body: body,
+          headers: {
+            'Content-Length': body.length.toString(),
+          },
+        })
+
+        expect(resp.ok).toBeTruthy()
+      })
+
+      it('can fetch an asset via presigned URL', async () => {
+        const bucket = await createBucket(client)
+        const key = 'test-1.jpg'
+
+        await uploadFile(client, bucket, key, 2)
+
+        const getUrl = await getSignedUrl(
+          client,
+          new GetObjectCommand({
+            Bucket: bucket,
+            Key: key,
+          }),
+          { expiresIn: 100 }
+        )
+
+        const resp = await fetch(getUrl)
+
+        expect(resp.ok).toBeTruthy()
       })
     })
   })

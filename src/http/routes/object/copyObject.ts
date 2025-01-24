@@ -1,8 +1,10 @@
 import { FastifyInstance, FastifyRequest } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
-import { createDefaultSchema } from '../../generic-routes'
-import { AuthenticatedRequest } from '../../request'
+import { createDefaultSchema } from '../../routes-helper'
+import { AuthenticatedRequest } from '../../types'
 import { ROUTE_OPERATIONS } from '../operations'
+import { parseUserMetadata } from '@storage/uploader'
+import { objectSchema } from '@storage/schemas'
 
 const copyRequestBodySchema = {
   type: 'object',
@@ -11,13 +13,23 @@ const copyRequestBodySchema = {
     sourceKey: { type: 'string', examples: ['folder/source.png'] },
     destinationBucket: { type: 'string', examples: ['users'] },
     destinationKey: { type: 'string', examples: ['folder/destination.png'] },
+    metadata: {
+      type: 'object',
+      properties: {
+        cacheControl: { type: 'string' },
+        mimetype: { type: 'string' },
+      },
+    },
+    copyMetadata: { type: 'boolean', examples: [true] },
   },
   required: ['sourceKey', 'bucketId', 'destinationKey'],
 } as const
 const successResponseSchema = {
   type: 'object',
   properties: {
+    Id: { type: 'string' },
     Key: { type: 'string', examples: ['folder/destination.png'] },
+    ...objectSchema.properties,
   },
   required: ['Key'],
 }
@@ -47,17 +59,29 @@ export default async function routes(fastify: FastifyInstance) {
       },
     },
     async (request, response) => {
-      const { sourceKey, destinationKey, bucketId, destinationBucket } = request.body
+      const { sourceKey, destinationKey, bucketId, destinationBucket, metadata } = request.body
 
       const destinationBucketId = destinationBucket || bucketId
+      const userMetadata = request.headers['x-metadata']
 
-      const result = await request.storage
-        .from(bucketId)
-        .copyObject(sourceKey, destinationBucketId, destinationKey, request.owner)
+      const result = await request.storage.from(bucketId).copyObject({
+        sourceKey,
+        destinationBucket: destinationBucketId,
+        destinationKey,
+        owner: request.owner,
+        userMetadata:
+          typeof userMetadata === 'string' ? parseUserMetadata(userMetadata) : undefined,
+        metadata: metadata,
+        copyMetadata: request.body.copyMetadata ?? true,
+        upsert: request.headers['x-upsert'] === 'true',
+      })
 
       return response.status(result.httpStatusCode ?? 200).send({
+        // Deprecated, remove in next major
         Id: result.destObject.id,
         Key: `${destinationBucketId}/${destinationKey}`,
+
+        ...result.destObject,
       })
     }
   )

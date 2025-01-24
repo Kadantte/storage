@@ -1,8 +1,8 @@
 import { FastifyInstance } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
-import { createDefaultSchema } from '../../generic-routes'
-import { AuthenticatedRequest } from '../../request'
-import { objectSchema } from '../../../storage/schemas'
+import { createDefaultSchema } from '../../routes-helper'
+import { AuthenticatedRequest } from '../../types'
+import { objectSchema } from '@storage/schemas'
 import { ROUTE_OPERATIONS } from '../operations'
 
 const searchRequestParamsSchema = {
@@ -73,7 +73,7 @@ export default async function routes(fastify: FastifyInstance) {
         },
       })
 
-      response.status(200).send(results)
+      return response.status(200).send(results)
     }
   )
 }

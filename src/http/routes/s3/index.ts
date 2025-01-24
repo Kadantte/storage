@@ -1,9 +1,19 @@
 import { FastifyInstance, RouteHandlerMethod } from 'fastify'
-import { db, jsonToXml, signatureV4, storage } from '../../plugins'
-import { getRouter, RequestInput } from './router'
+import fastifyMultipart from '@fastify/multipart'
+import { JSONSchema } from 'json-schema-to-ts'
+import { trace } from '@opentelemetry/api'
+import { db, xmlParser, requireTenantFeature, signatureV4, storage } from '../../plugins'
+import { findArrayPathsInSchemas, getRouter, RequestInput } from './router'
 import { s3ErrorHandler } from './error-handler'
+import { getConfig } from '../../../config'
+
+const { s3ProtocolEnabled } = getConfig()
 
 export default async function routes(fastify: FastifyInstance) {
+  if (!s3ProtocolEnabled) {
+    return
+  }
+
   fastify.register(async (fastify) => {
     const s3Router = getRouter()
     const s3Routes = s3Router.routes()
@@ -33,38 +43,67 @@ export default async function routes(fastify: FastifyInstance) {
                 throw new Error('no handler found')
               }
 
-              req.operation = { type: route.operation }
-
-              const data: RequestInput<any> = {
-                Params: req.params,
-                Body: req.body,
-                Headers: req.headers,
-                Querystring: req.query,
-              }
-              const compiler = route.compiledSchema()
-              const isValid = compiler(data)
-
-              if (!isValid) {
-                throw { validation: compiler.errors }
-              }
-
-              const output = await route.handler(data, {
-                req: req,
-                storage: req.storage,
-                tenantId: req.tenantId,
-                owner: req.owner,
-              })
-
-              const headers = output.headers
-
-              if (headers) {
-                Object.keys(headers).forEach((header) => {
-                  if (headers[header]) {
-                    reply.header(header, headers[header])
-                  }
+              if (!route.acceptMultiformData && req.isMultipart()) {
+                return reply.status(400).send({
+                  message: 'Multipart form data not supported',
                 })
               }
-              return reply.status(output.statusCode || 200).send(output.responseBody)
+
+              try {
+                req.operation = { type: route.operation }
+
+                if (req.operation.type) {
+                  trace.getActiveSpan()?.setAttribute('http.operation', req.operation.type)
+                }
+
+                const data: RequestInput<any> = {
+                  Params: req.params,
+                  Body: req.body,
+                  Headers: req.headers,
+                  Querystring: req.query,
+                }
+                const compiler = route.compiledSchema()
+                const isValid = compiler(data)
+
+                if (!isValid) {
+                  throw { validation: compiler.errors }
+                }
+
+                const output = await route.handler(data, {
+                  req: req,
+                  storage: req.storage,
+                  tenantId: req.tenantId,
+                  owner: req.owner,
+                  signals: {
+                    body: req.signals.body.signal,
+                    response: req.signals.response.signal,
+                  },
+                })
+
+                const headers = output.headers
+
+                if (headers) {
+                  Object.keys(headers).forEach((header) => {
+                    if (headers[header]) {
+                      reply.header(header, headers[header])
+                    }
+                  })
+                }
+                return reply.status(output.statusCode || 200).send(output.responseBody)
+              } catch (e) {
+                if (route.disableContentTypeParser) {
+                  reply.header('connection', 'close')
+                  reply.raw.on('finish', () => {
+                    // wait sometime so that the client can receive the response
+                    setTimeout(() => {
+                      if (!req.raw.destroyed) {
+                        req.raw.destroy()
+                      }
+                    }, 3000)
+                  })
+                }
+                throw e
+              }
             }
           }
 
@@ -72,6 +111,8 @@ export default async function routes(fastify: FastifyInstance) {
         }
 
         fastify.register(async (localFastify) => {
+          localFastify.register(requireTenantFeature('s3Protocol'))
+
           const disableContentParser = routesByMethod?.some(
             (route) => route.disableContentTypeParser
           )
@@ -85,18 +126,33 @@ export default async function routes(fastify: FastifyInstance) {
             )
           }
 
-          fastify.register(jsonToXml, {
-            disableContentParser,
+          localFastify.register(fastifyMultipart, {
+            limits: {
+              fields: 20,
+              files: 1,
+            },
+            throwFileSizeLimit: false,
           })
-          fastify.register(signatureV4)
-          fastify.register(db)
-          fastify.register(storage)
+
+          localFastify.register(signatureV4)
+          localFastify.register(xmlParser, {
+            disableContentParser: disableContentParser,
+            parseAsArray: findArrayPathsInSchemas(
+              routesByMethod.filter((r) => r.schema.Body).map((r) => r.schema.Body as JSONSchema)
+            ),
+          })
+
+          localFastify.register(db)
+          localFastify.register(storage)
 
           localFastify[method](
             routePath,
             {
               validatorCompiler: () => () => true,
               exposeHeadRoute: false,
+              schema: {
+                tags: ['s3'],
+              },
               errorHandler: s3ErrorHandler,
             },
             routeHandler
@@ -109,6 +165,9 @@ export default async function routes(fastify: FastifyInstance) {
               {
                 validatorCompiler: () => () => true,
                 exposeHeadRoute: false,
+                schema: {
+                  tags: ['s3'],
+                },
                 errorHandler: s3ErrorHandler,
               },
               routeHandler

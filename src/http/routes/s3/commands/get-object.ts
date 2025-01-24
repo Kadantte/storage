@@ -1,4 +1,4 @@
-import { S3ProtocolHandler } from '../../../../storage/protocols/s3/s3-handler'
+import { S3ProtocolHandler } from '@storage/protocols/s3/s3-handler'
 import { S3Router } from '../router'
 import { ROUTE_OPERATIONS } from '../../operations'
 
@@ -63,13 +63,18 @@ export default function GetObject(s3Router: S3Router) {
       const s3Protocol = new S3ProtocolHandler(ctx.storage, ctx.tenantId, ctx.owner)
       const ifModifiedSince = req.Headers?.['if-modified-since']
 
-      return s3Protocol.getObject({
-        Bucket: req.Params.Bucket,
-        Key: req.Params['*'],
-        Range: req.Headers?.['range'],
-        IfNoneMatch: req.Headers?.['if-none-match'],
-        IfModifiedSince: ifModifiedSince ? new Date(ifModifiedSince) : undefined,
-      })
+      return s3Protocol.getObject(
+        {
+          Bucket: req.Params.Bucket,
+          Key: req.Params['*'],
+          Range: req.Headers?.['range'],
+          IfNoneMatch: req.Headers?.['if-none-match'],
+          IfModifiedSince: ifModifiedSince ? new Date(ifModifiedSince) : undefined,
+        },
+        {
+          signal: ctx.signals.response,
+        }
+      )
     }
   )
 }

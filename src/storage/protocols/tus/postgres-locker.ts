@@ -1,10 +1,10 @@
 import { Lock, Locker, RequestRelease } from '@tus/server'
-import { clearTimeout } from 'timers'
-import EventEmitter from 'events'
-import { Database, DBError } from '../../database'
-import { PubSubAdapter } from '../../../pubsub'
+import { clearTimeout } from 'node:timers'
+import EventEmitter from 'node:events'
+import { Database } from '../../database'
+import { PubSubAdapter } from '@internal/pubsub'
 import { UploadId } from './upload-id'
-import { ERRORS } from '../../errors'
+import { ErrorCode, ERRORS, StorageBackendError } from '@internal/errors'
 
 const REQUEST_LOCK_RELEASE_MESSAGE = 'REQUEST_LOCK_RELEASE'
 
@@ -53,21 +53,24 @@ export class PgLock implements Lock {
       this.db
         .withTransaction(async (db) => {
           const abortController = new AbortController()
-          const acquired = await Promise.race([
-            this.waitTimeout(15000, abortController.signal),
-            this.acquireLock(db, this.id, abortController.signal),
-          ])
 
-          abortController.abort()
+          try {
+            const acquired = await Promise.race([
+              this.waitTimeout(5000, abortController.signal),
+              this.acquireLock(db, this.id, abortController.signal),
+            ])
 
-          if (!acquired) {
-            throw ERRORS.LockTimeout()
+            if (!acquired) {
+              throw ERRORS.LockTimeout()
+            }
+
+            await new Promise<void>((innerResolve) => {
+              this.tnxResolver = innerResolve
+              resolve()
+            })
+          } finally {
+            abortController.abort()
           }
-
-          await new Promise<void>((innerResolve) => {
-            this.tnxResolver = innerResolve
-            resolve()
-          })
         })
         .catch(reject)
     })
@@ -91,7 +94,7 @@ export class PgLock implements Lock {
         await db.mustLockObject(uploadId.bucket, uploadId.objectName, uploadId.version)
         return true
       } catch (e) {
-        if (e instanceof DBError && e.message === 'resource_locked') {
+        if (e instanceof StorageBackendError && e.code === ErrorCode.ResourceLocked) {
           await this.notifier.release(id)
           await new Promise((resolve) => {
             setTimeout(resolve, 500)
@@ -112,7 +115,7 @@ export class PgLock implements Lock {
         clearTimeout(timeoutId)
         signal.removeEventListener('abort', onAbort)
       }
-      signal.addEventListener('abort', onAbort)
+      signal.addEventListener('abort', onAbort, { once: true })
     })
   }
 }

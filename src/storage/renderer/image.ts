@@ -4,7 +4,7 @@ import { getConfig } from '../../config'
 import { FastifyRequest } from 'fastify'
 import { Renderer, RenderOptions } from './renderer'
 import axiosRetry from 'axios-retry'
-import { ERRORS } from '../errors'
+import { ERRORS } from '@internal/errors'
 import { Stream } from 'stream'
 import Agent from 'agentkeepalive'
 
@@ -68,6 +68,10 @@ axiosRetry(client, {
   },
 })
 
+interface TransformLimits {
+  maxResolution?: number
+}
+
 /**
  * ImageRenderer
  * renders an image by applying transformations
@@ -77,6 +81,7 @@ axiosRetry(client, {
 export class ImageRenderer extends Renderer {
   private readonly client: Axios
   private transformOptions?: TransformOptions
+  private limits?: TransformLimits
 
   constructor(private readonly backend: StorageBackendAdapter) {
     super()
@@ -118,6 +123,15 @@ export class ImageRenderer extends Renderer {
     return segments
   }
 
+  static applyTransformationLimits(limits: TransformLimits) {
+    const transforms: string[] = []
+    if (typeof limits?.maxResolution === 'number') {
+      transforms.push(`max_src_resolution:${limits.maxResolution}`)
+    }
+
+    return transforms
+  }
+
   protected static formatResizeType(resize: TransformOptions['resize']) {
     const defaultResize = 'fill'
 
@@ -146,6 +160,11 @@ export class ImageRenderer extends Renderer {
    */
   setTransformations(transformations: TransformOptions) {
     this.transformOptions = transformations
+    return this
+  }
+
+  setLimits(limits: TransformLimits) {
+    this.limits = limits
     return this
   }
 
@@ -190,10 +209,12 @@ export class ImageRenderer extends Renderer {
       this.backend.headObject(options.bucket, options.key, options.version),
     ])
     const transformations = ImageRenderer.applyTransformation(this.transformOptions || {})
+    const transformLimits = ImageRenderer.applyTransformationLimits(this.limits || {})
 
     const url = [
       '/public',
       ...transformations,
+      ...transformLimits,
       'plain',
       privateURL.startsWith('local://') ? privateURL : encodeURIComponent(privateURL),
     ]
@@ -204,6 +225,7 @@ export class ImageRenderer extends Renderer {
 
       const response = await this.getClient().get(url.join('/'), {
         responseType: 'stream',
+        signal: options.signal,
         headers: acceptHeader
           ? {
               accept: acceptHeader,

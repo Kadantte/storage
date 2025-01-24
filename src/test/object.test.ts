@@ -4,17 +4,16 @@ import FormData from 'form-data'
 import fs from 'fs'
 import app from '../app'
 import { getConfig, mergeConfig } from '../config'
-import { S3Backend } from '../storage/backend'
-import { Obj } from '../storage/schemas'
-import { signJWT } from '../auth'
-import { ErrorCode, StorageBackendError } from '../storage'
+import { signJWT } from '@internal/auth'
+import { Obj, backends } from '../storage'
 import { useMockObject, useMockQueue } from './common'
-import { getPostgresConnection } from '../database'
-import { getServiceKeyUser } from '../database/tenant'
+import { getServiceKeyUser, getPostgresConnection } from '@internal/database'
 import { Knex } from 'knex'
+import { ErrorCode, StorageBackendError } from '@internal/errors'
 
 const { jwtSecret, serviceKey, tenantId } = getConfig()
 const anonKey = process.env.ANON_KEY || ''
+const S3Backend = backends.S3Backend
 
 let tnx: Knex.Transaction | undefined
 async function getSuperuserPostgrestClient() {
@@ -62,6 +61,20 @@ describe('testing GET object', () => {
     expect(S3Backend.prototype.getObject).toBeCalled()
   })
 
+  test('check if RLS policies are respected: authenticated user is able to read authenticated resource without /authenticated prefix', async () => {
+    const response = await app().inject({
+      method: 'GET',
+      url: '/object/bucket2/authenticated/casestudy.png',
+      headers: {
+        authorization: `Bearer ${process.env.AUTHENTICATED_KEY}`,
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['etag']).toBe('abc')
+    expect(response.headers['last-modified']).toBe('Thu, 12 Aug 2021 16:00:00 GMT')
+    expect(S3Backend.prototype.getObject).toBeCalled()
+  })
+
   test('forward 304 and If-Modified-Since/If-None-Match headers', async () => {
     const mockGetObject = jest.spyOn(S3Backend.prototype, 'getObject')
     mockGetObject.mockRejectedValue({
@@ -96,15 +109,37 @@ describe('testing GET object', () => {
     expect(response.statusCode).toBe(200)
     expect(response.headers['etag']).toBe('abc')
     expect(response.headers['last-modified']).toBe('Wed, 12 Oct 2022 11:17:02 GMT')
-    expect(response.headers['content-length']).toBe(3746)
+    expect(response.headers['content-length']).toBe('3746')
     expect(response.headers['cache-control']).toBe('no-cache')
-    expect(S3Backend.prototype.headObject).toBeCalled()
   })
 
-  test('get public object info', async () => {
+  test('get authenticated object info without the /authenticated prefix', async () => {
     const response = await app().inject({
       method: 'HEAD',
-      url: '/object/public/public-bucket-2/favicon.ico',
+      url: '/object/bucket2/authenticated/casestudy.png',
+      headers: {
+        authorization: `Bearer ${process.env.AUTHENTICATED_KEY}`,
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['etag']).toBe('abc')
+    expect(response.headers['last-modified']).toBe('Wed, 12 Oct 2022 11:17:02 GMT')
+    expect(response.headers['content-length']).toBe('3746')
+    expect(response.headers['cache-control']).toBe('no-cache')
+  })
+
+  test('cannot get authenticated object info without the /authenticated prefix if no jwt is provided', async () => {
+    const response = await app().inject({
+      method: 'HEAD',
+      url: '/object/bucket2/authenticated/casestudy.png',
+    })
+    expect(response.statusCode).toBe(400)
+  })
+
+  test('get public object info without using the /public prefix', async () => {
+    const response = await app().inject({
+      method: 'HEAD',
+      url: '/object/public-bucket-2/favicon.ico',
       headers: {
         authorization: ``,
       },
@@ -112,9 +147,23 @@ describe('testing GET object', () => {
     expect(response.statusCode).toBe(200)
     expect(response.headers['etag']).toBe('abc')
     expect(response.headers['last-modified']).toBe('Wed, 12 Oct 2022 11:17:02 GMT')
-    expect(response.headers['content-length']).toBe(3746)
+    expect(response.headers['content-length']).toBe('3746')
     expect(response.headers['cache-control']).toBe('no-cache')
-    expect(S3Backend.prototype.headObject).toBeCalled()
+  })
+
+  test('get public object info', async () => {
+    const response = await app().inject({
+      method: 'HEAD',
+      url: '/object/public-bucket-2/favicon.ico',
+      headers: {
+        authorization: ``,
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['etag']).toBe('abc')
+    expect(response.headers['last-modified']).toBe('Wed, 12 Oct 2022 11:17:02 GMT')
+    expect(response.headers['content-length']).toBe('3746')
+    expect(response.headers['cache-control']).toBe('no-cache')
   })
 
   test('force downloading file with default name', async () => {
@@ -161,10 +210,31 @@ describe('testing GET object', () => {
     expect(S3Backend.prototype.getObject).not.toHaveBeenCalled()
   })
 
+  test('check if RLS policies are respected: anon user is not able to read authenticated resource without /authenticated prefix', async () => {
+    const response = await app().inject({
+      method: 'GET',
+      url: '/object/bucket2/authenticated/casestudy.png',
+      headers: {
+        authorization: `Bearer ${anonKey}`,
+      },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(S3Backend.prototype.getObject).not.toHaveBeenCalled()
+  })
+
   test('user is not able to read a resource without Auth header', async () => {
     const response = await app().inject({
       method: 'GET',
       url: '/object/authenticated/bucket2/authenticated/casestudy.png',
+    })
+    expect(response.statusCode).toBe(400)
+    expect(S3Backend.prototype.getObject).not.toHaveBeenCalled()
+  })
+
+  test('user is not able to read a resource without Auth header without the /authenticated prefix', async () => {
+    const response = await app().inject({
+      method: 'GET',
+      url: '/object/bucket2/authenticated/casestudy.png',
     })
     expect(response.statusCode).toBe(400)
     expect(S3Backend.prototype.getObject).not.toHaveBeenCalled()
@@ -357,6 +427,126 @@ describe('testing POST object via multipart upload', () => {
     expect(S3Backend.prototype.uploadObject).toHaveBeenCalled()
   })
 
+  test('successfully uploading an object with custom metadata using form data', async () => {
+    const form = new FormData()
+    form.append('file', fs.createReadStream(`./src/test/assets/sadcat.jpg`))
+    form.append(
+      'metadata',
+      JSON.stringify({
+        test1: 'test1',
+        test2: 'test2',
+      })
+    )
+    const headers = Object.assign({}, form.getHeaders(), {
+      authorization: `Bearer ${serviceKey}`,
+      'x-upsert': 'true',
+      ...form.getHeaders(),
+    })
+
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/bucket2/sadcat-upload3012.png',
+      headers,
+      payload: form,
+    })
+    expect(response.statusCode).toBe(200)
+    expect(S3Backend.prototype.uploadObject).toHaveBeenCalled()
+
+    const client = await getSuperuserPostgrestClient()
+
+    const object = await client
+      .table('objects')
+      .select('*')
+      .where('name', 'sadcat-upload3012.png')
+      .where('bucket_id', 'bucket2')
+      .first()
+
+    expect(object).not.toBeFalsy()
+    expect(object?.user_metadata).toEqual({
+      test1: 'test1',
+      test2: 'test2',
+    })
+  })
+
+  test('successfully uploading an object with custom metadata using stream', async () => {
+    const file = fs.createReadStream(`./src/test/assets/sadcat.jpg`)
+
+    const headers = {
+      authorization: `Bearer ${serviceKey}`,
+      'x-upsert': 'true',
+      'x-metadata': Buffer.from(
+        JSON.stringify({
+          test1: 'test1',
+          test2: 'test2',
+        })
+      ).toString('base64'),
+    }
+
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/bucket2/sadcat-upload3018.png',
+      headers,
+      payload: file,
+    })
+    expect(response.statusCode).toBe(200)
+    expect(S3Backend.prototype.uploadObject).toHaveBeenCalled()
+
+    const client = await getSuperuserPostgrestClient()
+
+    const object = await client
+      .table('objects')
+      .select('*')
+      .where('name', 'sadcat-upload3018.png')
+      .where('bucket_id', 'bucket2')
+      .first()
+
+    expect(object).not.toBeFalsy()
+    expect(object?.user_metadata).toEqual({
+      test1: 'test1',
+      test2: 'test2',
+    })
+  })
+
+  test('fetch object metadata', async () => {
+    const form = new FormData()
+    form.append('file', fs.createReadStream(`./src/test/assets/sadcat.jpg`))
+    form.append(
+      'metadata',
+      JSON.stringify({
+        test1: 'test1',
+        test2: 'test2',
+      })
+    )
+    const headers = Object.assign({}, form.getHeaders(), {
+      authorization: `Bearer ${serviceKey}`,
+      'x-upsert': 'true',
+    })
+
+    const uploadResponse = await app().inject({
+      method: 'POST',
+      url: '/object/bucket2/sadcat-upload3019.png',
+      headers: {
+        ...headers,
+        ...form.getHeaders(),
+      },
+      payload: form,
+    })
+    expect(uploadResponse.statusCode).toBe(200)
+
+    const response = await app().inject({
+      method: 'GET',
+      url: '/object/info/bucket2/sadcat-upload3019.png',
+      headers,
+    })
+
+    const data = await response.json()
+
+    expect(data.metadata).toEqual({
+      test1: 'test1',
+      test2: 'test2',
+    })
+  })
+
   test('return 422 when uploading an object with a not allowed mime-type', async () => {
     const form = new FormData()
     form.append('file', fs.createReadStream(`./src/test/assets/sadcat.jpg`))
@@ -379,6 +569,43 @@ describe('testing POST object via multipart upload', () => {
       statusCode: '415',
     })
     expect(S3Backend.prototype.uploadObject).not.toHaveBeenCalled()
+  })
+
+  test('can create an empty folder when mime-type is set', async () => {
+    const form = new FormData()
+    const headers = Object.assign({}, form.getHeaders(), {
+      authorization: `Bearer ${serviceKey}`,
+      'x-upsert': 'true',
+    })
+
+    form.append('file', Buffer.alloc(0))
+
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/public-limit-mime-types/nested/.emptyFolderPlaceholder',
+      headers,
+      payload: form,
+    })
+    expect(response.statusCode).toBe(200)
+    expect(S3Backend.prototype.uploadObject).toHaveBeenCalled()
+  })
+
+  test('cannot create an empty folder with more than 0kb', async () => {
+    const form = new FormData()
+    const headers = Object.assign({}, form.getHeaders(), {
+      authorization: `Bearer ${serviceKey}`,
+      'x-upsert': 'true',
+    })
+
+    form.append('file', Buffer.alloc(1))
+
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/public-limit-mime-types/nested-2/.emptyFolderPlaceholder',
+      headers,
+      payload: form,
+    })
+    expect(response.statusCode).toBe(400)
   })
 
   test('return 422 when uploading an object with a malformed mime-type', async () => {
@@ -989,7 +1216,8 @@ describe('testing copy object', () => {
     })
     expect(response.statusCode).toBe(200)
     expect(S3Backend.prototype.copyObject).toBeCalled()
-    expect(response.body).toBe(`{"Key":"bucket2/authenticated/casestudy11.png"}`)
+    const jsonResponse = await response.json()
+    expect(jsonResponse.Key).toBe(`bucket2/authenticated/casestudy11.png`)
   })
 
   test('can copy objects across buckets', async () => {
@@ -1008,7 +1236,134 @@ describe('testing copy object', () => {
     })
     expect(response.statusCode).toBe(200)
     expect(S3Backend.prototype.copyObject).toBeCalled()
-    expect(response.body).toBe(`{"Key":"bucket3/authenticated/casestudy11.png"}`)
+    const jsonResponse = await response.json()
+
+    expect(jsonResponse.Key).toBe(`bucket3/authenticated/casestudy11.png`)
+  })
+
+  test('can copy objects keeping their metadata', async () => {
+    const copiedKey = 'casestudy-2349.png'
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/copy',
+      headers: {
+        authorization: `Bearer ${process.env.AUTHENTICATED_KEY}`,
+      },
+      payload: {
+        bucketId: 'bucket2',
+        sourceKey: 'authenticated/casestudy.png',
+        destinationKey: `authenticated/${copiedKey}`,
+        copyMetadata: true,
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(S3Backend.prototype.copyObject).toBeCalled()
+    const jsonResponse = response.json()
+    expect(jsonResponse.Key).toBe(`bucket2/authenticated/${copiedKey}`)
+
+    const conn = await getSuperuserPostgrestClient()
+    const object = await conn
+      .table('objects')
+      .select('*')
+      .where('bucket_id', 'bucket2')
+      .where('name', `authenticated/${copiedKey}`)
+      .first()
+
+    expect(object).not.toBeFalsy()
+    expect(object.user_metadata).toEqual({
+      test1: 1234,
+    })
+  })
+
+  test('can copy objects to itself overwriting their metadata', async () => {
+    const copiedKey = 'casestudy-2349.png'
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/copy',
+      headers: {
+        authorization: `Bearer ${process.env.AUTHENTICATED_KEY}`,
+        'x-upsert': 'true',
+        'x-metadata': Buffer.from(
+          JSON.stringify({
+            newMetadata: 'test1',
+          })
+        ).toString('base64'),
+      },
+      payload: {
+        bucketId: 'bucket2',
+        sourceKey: `authenticated/${copiedKey}`,
+        destinationKey: `authenticated/${copiedKey}`,
+        metadata: {
+          cacheControl: 'max-age=999',
+          mimetype: 'image/gif',
+        },
+        copyMetadata: false,
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(S3Backend.prototype.copyObject).toBeCalled()
+    const parsedBody = JSON.parse(response.body)
+
+    expect(parsedBody.Key).toBe(`bucket2/authenticated/${copiedKey}`)
+    expect(parsedBody.name).toBe(`authenticated/${copiedKey}`)
+    expect(parsedBody.bucket_id).toBe(`bucket2`)
+    expect(parsedBody.metadata).toEqual(
+      expect.objectContaining({
+        cacheControl: 'max-age=999',
+        mimetype: 'image/gif',
+      })
+    )
+
+    const conn = await getSuperuserPostgrestClient()
+    const object = await conn
+      .table('objects')
+      .select('*')
+      .where('bucket_id', 'bucket2')
+      .where('name', `authenticated/${copiedKey}`)
+      .first()
+
+    expect(object).not.toBeFalsy()
+    expect(object.user_metadata).toEqual({
+      newMetadata: 'test1',
+    })
+    expect(object.metadata).toEqual(
+      expect.objectContaining({
+        cacheControl: 'max-age=999',
+        mimetype: 'image/gif',
+      })
+    )
+  })
+
+  test('can copy objects excluding their metadata', async () => {
+    const copiedKey = 'casestudy-2450.png'
+    const response = await app().inject({
+      method: 'POST',
+      url: '/object/copy',
+      headers: {
+        authorization: `Bearer ${process.env.AUTHENTICATED_KEY}`,
+      },
+      payload: {
+        bucketId: 'bucket2',
+        sourceKey: 'authenticated/casestudy.png',
+        destinationKey: `authenticated/${copiedKey}`,
+        copyMetadata: false,
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(S3Backend.prototype.copyObject).toBeCalled()
+    const jsonResponse = response.json()
+    expect(jsonResponse.Key).toBe(`bucket2/authenticated/${copiedKey}`)
+
+    const conn = await getSuperuserPostgrestClient()
+    const object = await conn
+      .table('objects')
+      .select('*')
+      .where('bucket_id', 'bucket2')
+      .where('name', `authenticated/${copiedKey}`)
+      .first()
+
+    expect(object).not.toBeFalsy()
+    expect(object.user_metadata).toBeNull()
   })
 
   test('cannot copy objects across buckets when RLS dont allow it', async () => {
@@ -1942,7 +2297,7 @@ describe('testing list objects', () => {
     })
     expect(response.statusCode).toBe(200)
     const responseJSON = JSON.parse(response.body)
-    expect(responseJSON).toHaveLength(6)
+    expect(responseJSON).toHaveLength(9)
     const names = responseJSON.map((ele: any) => ele.name)
     expect(names).toContain('curlimage.jpg')
     expect(names).toContain('private')

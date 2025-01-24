@@ -1,5 +1,9 @@
 {
   "compilerOptions": {
+    "paths": {
+        "@internal/*": ["./src/internal/*"],
+        "@storage/*": ["./src/storage/*"],
+    },
     "downlevelIteration": true,
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
@@ -9,7 +13,7 @@
     "rootDir": "src",
     "moduleResolution": "node",
     "module": "commonjs",
-    "target": "ES2020",
+    "target": "ES2021",
     "outDir": "dist",
     "sourceMap": true,
     "strict": true,

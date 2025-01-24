@@ -9,7 +9,9 @@ export enum MultitenantMigrationStrategy {
 }
 
 type StorageConfigType = {
+  isProduction: boolean
   version: string
+  exposeDocs: boolean
   keepAliveTimeout: number
   headersTimeout: number
   adminApiKeys: string
@@ -18,11 +20,13 @@ type StorageConfigType = {
   uploadFileSizeLimit: number
   uploadFileSizeLimitStandard?: number
   storageFilePath?: string
-  storageS3MaxSockets?: number
+  storageFileEtagAlgorithm: 'mtime' | 'md5'
+  storageS3MaxSockets: number
   storageS3Bucket: string
   storageS3Endpoint?: string
   storageS3ForcePathStyle?: boolean
   storageS3Region: string
+  storageS3ClientTimeout: number
   isMultitenant: boolean
   jwtSecret: string
   jwtAlgorithm: string
@@ -53,12 +57,17 @@ type StorageConfigType = {
   tenantId: string
   requestUrlLengthLimit: number
   requestXForwardedHostRegExp?: string
+  requestAllowXForwardedPrefix?: boolean
   logLevel?: string
   logflareEnabled?: boolean
   logflareApiKey?: string
   logflareSourceToken?: string
   pgQueueEnable: boolean
+  pgQueueEnableWorkers?: boolean
+  pgQueueReadWriteTimeout: number
+  pgQueueMaxConnections: number
   pgQueueConnectionURL?: string
+  pgQueueDeleteAfterHours?: number
   pgQueueDeleteAfterDays?: number
   pgQueueArchiveCompletedAfterSeconds?: number
   pgQueueRetentionDays?: number
@@ -67,6 +76,8 @@ type StorageConfigType = {
   webhookQueuePullInterval?: number
   webhookQueueTeamSize?: number
   webhookQueueConcurrency?: number
+  webhookMaxConnections: number
+  webhookQueueMaxFreeSockets: number
   adminDeleteQueueTeamSize?: number
   adminDeleteConcurrency?: number
   imageTransformationEnabled: boolean
@@ -93,15 +104,26 @@ type StorageConfigType = {
   rateLimiterRedisCommandTimeout: number
   uploadSignedUrlExpirationTime: number
   tusUrlExpiryMs: number
+  tusMaxConcurrentUploads: number
   tusPath: string
   tusPartSize: number
   tusUseFileVersionSeparator: boolean
+  tusAllowS3Tags: boolean
   defaultMetricsEnabled: boolean
+  s3ProtocolEnabled: boolean
   s3ProtocolPrefix: string
   s3ProtocolAllowForwardedHeader: boolean
   s3ProtocolEnforceRegion: boolean
   s3ProtocolAccessKeyId?: string
   s3ProtocolAccessKeySecret?: string
+  s3ProtocolNonCanonicalHostHeader?: string
+  tracingEnabled?: boolean
+  tracingMode?: string
+  tracingTimeMinDuration: number
+  tracingReturnServerTimings: boolean
+  tracingFeatures?: {
+    upload: boolean
+  }
 }
 
 function getOptionalConfigFromEnv(key: string, fallback?: string): string | undefined {
@@ -149,14 +171,18 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
   }
 
   envPaths.map((envPath) => dotenv.config({ path: envPath, override: false }))
+  const isMultitenant = getOptionalConfigFromEnv('MULTI_TENANT', 'IS_MULTITENANT') === 'true'
 
   config = {
+    isProduction: process.env.NODE_ENV === 'production',
+    exposeDocs: getOptionalConfigFromEnv('EXPOSE_DOCS') !== 'false',
+    isMultitenant,
     // Tenant
-    tenantId:
-      getOptionalConfigFromEnv('PROJECT_REF') ||
-      getOptionalConfigFromEnv('TENANT_ID') ||
-      'storage-single-tenant',
-    isMultitenant: getOptionalConfigFromEnv('MULTI_TENANT', 'IS_MULTITENANT') === 'true',
+    tenantId: isMultitenant
+      ? ''
+      : getOptionalConfigFromEnv('PROJECT_REF') ||
+        getOptionalConfigFromEnv('TENANT_ID') ||
+        'storage-single-tenant',
 
     // Server
     region: getOptionalConfigFromEnv('SERVER_REGION', 'REGION') || 'not-specified',
@@ -172,6 +198,8 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
       'REQUEST_X_FORWARDED_HOST_REGEXP',
       'X_FORWARDED_HOST_REGEXP'
     ),
+    requestAllowXForwardedPrefix:
+      getOptionalConfigFromEnv('REQUEST_ALLOW_X_FORWARDED_PATH') === 'true',
     requestUrlLengthLimit:
       Number(getOptionalConfigFromEnv('REQUEST_URL_LENGTH_LIMIT', 'URL_LENGTH_LIMIT')) || 7_500,
     requestTraceHeader: getOptionalConfigFromEnv('REQUEST_TRACE_HEADER', 'REQUEST_ID_HEADER'),
@@ -219,16 +247,25 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
       getOptionalConfigFromEnv('TUS_URL_EXPIRY_MS') || (1000 * 60 * 60).toString(),
       10
     ),
+    tusMaxConcurrentUploads: parseInt(
+      getOptionalConfigFromEnv('TUS_MAX_CONCURRENT_UPLOADS') || '500',
+      10
+    ),
     tusUseFileVersionSeparator:
       getOptionalConfigFromEnv('TUS_USE_FILE_VERSION_SEPARATOR') === 'true',
+    tusAllowS3Tags: getOptionalConfigFromEnv('TUS_ALLOW_S3_TAGS') !== 'false',
 
     // S3 Protocol
+    s3ProtocolEnabled: getOptionalConfigFromEnv('S3_PROTOCOL_ENABLED') !== 'false',
     s3ProtocolPrefix: getOptionalConfigFromEnv('S3_PROTOCOL_PREFIX') || '',
     s3ProtocolAllowForwardedHeader:
       getOptionalConfigFromEnv('S3_ALLOW_FORWARDED_HEADER') === 'true',
     s3ProtocolEnforceRegion: getOptionalConfigFromEnv('S3_PROTOCOL_ENFORCE_REGION') === 'true',
     s3ProtocolAccessKeyId: getOptionalConfigFromEnv('S3_PROTOCOL_ACCESS_KEY_ID'),
     s3ProtocolAccessKeySecret: getOptionalConfigFromEnv('S3_PROTOCOL_ACCESS_KEY_SECRET'),
+    s3ProtocolNonCanonicalHostHeader: getOptionalConfigFromEnv(
+      'S3_PROTOCOL_NON_CANONICAL_HOST_HEADER'
+    ),
     // Storage
     storageBackendType: getOptionalConfigFromEnv('STORAGE_BACKEND') as StorageBackendType,
 
@@ -237,6 +274,7 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
       'STORAGE_FILE_BACKEND_PATH',
       'FILE_STORAGE_BACKEND_PATH'
     ),
+    storageFileEtagAlgorithm: getOptionalConfigFromEnv('STORAGE_FILE_ETAG_ALGORITHM') || 'md5',
 
     // Storage - S3
     storageS3MaxSockets: parseInt(
@@ -249,6 +287,7 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
       getOptionalConfigFromEnv('STORAGE_S3_FORCE_PATH_STYLE', 'GLOBAL_S3_FORCE_PATH_STYLE') ===
       'true',
     storageS3Region: getOptionalConfigFromEnv('STORAGE_S3_REGION', 'REGION') as string,
+    storageS3ClientTimeout: Number(getOptionalConfigFromEnv('STORAGE_S3_CLIENT_TIMEOUT') || `0`),
 
     // DB - Migrations
     dbAnonRole: getOptionalConfigFromEnv('DB_ANON_ROLE') || 'anon',
@@ -292,14 +331,29 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
     defaultMetricsEnabled: !(
       getOptionalConfigFromEnv('DEFAULT_METRICS_ENABLED', 'ENABLE_DEFAULT_METRICS') === 'false'
     ),
+    tracingEnabled: getOptionalConfigFromEnv('TRACING_ENABLED') === 'true',
+    tracingMode: getOptionalConfigFromEnv('TRACING_MODE') ?? 'basic',
+    tracingTimeMinDuration: parseFloat(
+      getOptionalConfigFromEnv('TRACING_SERVER_TIME_MIN_DURATION') ?? '100.0'
+    ),
+    tracingReturnServerTimings:
+      getOptionalConfigFromEnv('TRACING_RETURN_SERVER_TIMINGS') === 'true',
+    tracingFeatures: {
+      upload: getOptionalConfigFromEnv('TRACING_FEATURE_UPLOAD') === 'true',
+    },
 
     // Queue
     pgQueueEnable: getOptionalConfigFromEnv('PG_QUEUE_ENABLE', 'ENABLE_QUEUE_EVENTS') === 'true',
+    pgQueueEnableWorkers: getOptionalConfigFromEnv('PG_QUEUE_WORKERS_ENABLE') !== 'false',
+    pgQueueReadWriteTimeout: Number(getOptionalConfigFromEnv('PG_QUEUE_READ_WRITE_TIMEOUT')) || 0,
+    pgQueueMaxConnections: Number(getOptionalConfigFromEnv('PG_QUEUE_MAX_CONNECTIONS')) || 4,
     pgQueueConnectionURL: getOptionalConfigFromEnv('PG_QUEUE_CONNECTION_URL'),
     pgQueueDeleteAfterDays: parseInt(
       getOptionalConfigFromEnv('PG_QUEUE_DELETE_AFTER_DAYS') || '2',
       10
     ),
+    pgQueueDeleteAfterHours:
+      Number(getOptionalConfigFromEnv('PG_QUEUE_DELETE_AFTER_HOURS')) || undefined,
     pgQueueArchiveCompletedAfterSeconds: parseInt(
       getOptionalConfigFromEnv('PG_QUEUE_ARCHIVE_COMPLETED_AFTER_SECONDS') || '7200',
       10
@@ -314,6 +368,12 @@ export function getConfig(options?: { reload?: boolean }): StorageConfigType {
     ),
     webhookQueueTeamSize: parseInt(getOptionalConfigFromEnv('QUEUE_WEBHOOKS_TEAM_SIZE') || '50'),
     webhookQueueConcurrency: parseInt(getOptionalConfigFromEnv('QUEUE_WEBHOOK_CONCURRENCY') || '5'),
+    webhookMaxConnections: parseInt(
+      getOptionalConfigFromEnv('QUEUE_WEBHOOK_MAX_CONNECTIONS') || '500'
+    ),
+    webhookQueueMaxFreeSockets: parseInt(
+      getOptionalConfigFromEnv('QUEUE_WEBHOOK_MAX_FREE_SOCKETS') || '20'
+    ),
     adminDeleteQueueTeamSize: parseInt(
       getOptionalConfigFromEnv('QUEUE_ADMIN_DELETE_TEAM_SIZE') || '50'
     ),

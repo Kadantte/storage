@@ -1,7 +1,9 @@
 import { FastifyInstance, RequestGenericInterface } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
-import { createDefaultSchema } from '../../generic-routes'
+import { createDefaultSchema } from '../../routes-helper'
 import { ROUTE_OPERATIONS } from '../operations'
+import fastifyMultipart from '@fastify/multipart'
+import { fileUploadFromRequest } from '@storage/uploader'
 
 const updateObjectParamsSchema = {
   type: 'object',
@@ -40,6 +42,14 @@ export default async function routes(fastify: FastifyInstance) {
     tags: ['object'],
   })
 
+  fastify.register(fastifyMultipart, {
+    limits: {
+      fields: 10,
+      files: 1,
+    },
+    throwFileSizeLimit: false,
+  })
+
   fastify.addContentTypeParser(
     ['application/json', 'text/plain'],
     function (request, payload, done) {
@@ -65,9 +75,11 @@ export default async function routes(fastify: FastifyInstance) {
 
       const { objectMetadata, path, id } = await request.storage
         .from(bucketName)
-        .uploadOverridingObject(request, {
-          owner,
-          objectName: objectName,
+        .uploadFromRequest(request, {
+          objectName,
+          signal: request.signals.body.signal,
+          owner: owner,
+          isUpsert: true,
         })
 
       return response.status(objectMetadata?.httpStatusCode ?? 200).send({

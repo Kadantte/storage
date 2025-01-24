@@ -23,6 +23,7 @@ export default async function routes(fastify: FastifyInstance) {
     fastify.register(jwt)
     fastify.register(db)
     fastify.register(storage)
+
     fastify.register(renderAuthenticatedImage)
   })
 
@@ -35,6 +36,7 @@ export default async function routes(fastify: FastifyInstance) {
 
     fastify.register(dbSuperUser)
     fastify.register(storage)
+
     fastify.register(renderSignedImage)
     fastify.register(renderPublicImage)
   })

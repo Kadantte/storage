@@ -2,6 +2,7 @@ import { FastifyReply, FastifyRequest } from 'fastify'
 import { ObjectMetadata } from '../backend'
 import { Readable } from 'stream'
 import { getConfig } from '../../config'
+import { Obj } from '../schemas'
 
 export interface RenderOptions {
   bucket: string
@@ -9,10 +10,12 @@ export interface RenderOptions {
   version: string | undefined
   download?: string
   expires?: string
+  object?: Obj
+  signal?: AbortSignal
 }
 
 export interface AssetResponse {
-  body?: Readable | ReadableStream<any> | Blob | Buffer
+  body?: Readable | ReadableStream<any> | Blob | Buffer | Record<any, any>
   metadata: ObjectMetadata
   transformations?: string[]
 }
@@ -37,6 +40,10 @@ export abstract class Renderer {
    */
   async render(request: FastifyRequest<any>, response: FastifyReply<any>, options: RenderOptions) {
     try {
+      if (options.signal?.aborted) {
+        return response.send({ error: 'Request aborted', statusCode: '499' })
+      }
+
       const data = await this.getAsset(request, options)
 
       this.setHeaders(request, response, data, options)

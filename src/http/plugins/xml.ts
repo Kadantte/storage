@@ -8,32 +8,43 @@ import xml from 'xml2js'
 // @ts-ignore
 import xmlBodyParser from 'fastify-xml-body-parser'
 
-export const jsonToXml = fastifyPlugin(async function (
-  fastify: FastifyInstance,
-  opts: { disableContentParser?: boolean }
-) {
-  fastify.register(accepts)
+export const xmlParser = fastifyPlugin(
+  async function (
+    fastify: FastifyInstance,
+    opts: { disableContentParser?: boolean; parseAsArray?: string[] }
+  ) {
+    fastify.register(accepts)
 
-  if (!opts.disableContentParser) {
-    fastify.register(xmlBodyParser)
-  }
-  fastify.addHook('preSerialization', async (req, res, payload) => {
-    const accept = req.accepts()
-
-    if (accept.types(['application/xml', 'application/json']) === 'application/xml') {
-      res.serializer((payload) => payload)
-
-      const xmlBuilder = new xml.Builder({
-        renderOpts: {
-          pretty: false,
+    if (!opts.disableContentParser) {
+      fastify.register(xmlBodyParser, {
+        contentType: ['text/xml', 'application/xml'],
+        isArray: (_: string, jpath: string) => {
+          return opts.parseAsArray?.includes(jpath)
         },
       })
-      const xmlPayload = xmlBuilder.buildObject(payload)
-      res.type('application/xml')
-      res.header('content-type', 'application/xml; charset=utf-8')
-      return xmlPayload
     }
 
-    return payload
-  })
-})
+    fastify.addHook('preSerialization', async (req, res, payload) => {
+      const accept = req.accepts()
+
+      const acceptedTypes = ['application/xml', 'text/html']
+
+      if (acceptedTypes.some((allowed) => accept.types(acceptedTypes) === allowed)) {
+        res.serializer((payload) => payload)
+
+        const xmlBuilder = new xml.Builder({
+          renderOpts: {
+            pretty: false,
+          },
+        })
+        const xmlPayload = xmlBuilder.buildObject(payload)
+        res.type('application/xml')
+        res.header('content-type', 'application/xml; charset=utf-8')
+        return xmlPayload
+      }
+
+      return payload
+    })
+  },
+  { name: 'xml-parser' }
+)

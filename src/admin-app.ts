@@ -4,10 +4,11 @@ import { Registry } from 'prom-client'
 
 const build = (opts: FastifyServerOptions = {}, appInstance?: FastifyInstance): FastifyInstance => {
   const app = fastify(opts)
+  app.register(plugins.signals)
   app.register(plugins.adminTenantId)
-  app.register(plugins.logTenantId)
   app.register(plugins.logRequest({ excludeUrls: ['/status', '/metrics', '/health'] }))
   app.register(routes.tenants, { prefix: 'tenants' })
+  app.register(routes.objects, { prefix: 'tenants' })
   app.register(routes.migrations, { prefix: 'migrations' })
   app.register(routes.s3Credentials, { prefix: 's3' })
 
@@ -35,6 +36,8 @@ const build = (opts: FastifyServerOptions = {}, appInstance?: FastifyInstance): 
 
       return reply.type(merged.contentType).send(data)
     })
+  } else {
+    app.register(plugins.metrics({ enabledEndpoint: true }))
   }
 
   app.get('/status', async (_, response) => response.status(200).send())

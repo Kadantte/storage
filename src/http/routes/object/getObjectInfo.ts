@@ -2,9 +2,10 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { FromSchema } from 'json-schema-to-ts'
 import { IncomingMessage, Server, ServerResponse } from 'http'
 import { getConfig } from '../../../config'
-import { AuthenticatedRangeRequest } from '../../request'
-import { Obj } from '../../../storage/schemas'
+import { AuthenticatedRangeRequest } from '../../types'
+import { Obj } from '@storage/schemas'
 import { ROUTE_OPERATIONS } from '../operations'
+import { ERRORS } from '@internal/errors'
 
 const { storageS3Bucket } = getConfig()
 
@@ -30,27 +31,54 @@ async function requestHandler(
     getObjectRequestInterface,
     unknown
   >,
-  publicRoute = false
+  publicRoute = false,
+  method: 'head' | 'info' = 'head'
 ) {
   const { bucketName } = request.params
   const objectName = request.params['*']
 
   const s3Key = `${request.tenantId}/${bucketName}/${objectName}`
 
-  let obj: Obj
-  if (publicRoute) {
-    await request.storage.asSuperUser().findBucket(bucketName, 'id', {
-      isPublic: true,
-    })
-    obj = await request.storage.asSuperUser().from(bucketName).findObject(objectName, 'id,version')
-  } else {
-    obj = await request.storage.from(bucketName).findObject(objectName, 'id,version')
+  const bucket = await request.storage.asSuperUser().findBucket(bucketName, 'id,public', {
+    dontErrorOnEmpty: true,
+  })
+
+  // Not Authenticated flow
+  if (!request.isAuthenticated) {
+    if (!bucket?.public) {
+      throw ERRORS.NoSuchBucket(bucketName)
+    }
   }
 
-  return request.storage.renderer('head').render(request, response, {
+  // Authenticated flow
+  if (!bucket) {
+    throw ERRORS.NoSuchBucket(bucketName)
+  }
+
+  let obj: Obj
+
+  if (bucket.public || publicRoute) {
+    obj = await request.storage
+      .asSuperUser()
+      .from(bucketName)
+      .findObject(
+        objectName,
+        'id,name,version,bucket_id,metadata,user_metadata,updated_at,created_at'
+      )
+  } else {
+    obj = await request.storage
+      .from(bucketName)
+      .findObject(
+        objectName,
+        'id,name,version,bucket_id,metadata,user_metadata,updated_at,created_at'
+      )
+  }
+
+  return request.storage.renderer(method).render(request, response, {
     bucket: storageS3Bucket,
     key: s3Key,
     version: obj.version,
+    object: obj,
   })
 }
 
@@ -90,7 +118,7 @@ export async function publicRoutes(fastify: FastifyInstance) {
       },
     },
     async (request, response) => {
-      return requestHandler(request, response, true)
+      return requestHandler(request, response, true, 'info')
     }
   )
 }
@@ -131,7 +159,7 @@ export async function authenticatedRoutes(fastify: FastifyInstance) {
       },
     },
     async (request, response) => {
-      return requestHandler(request, response)
+      return requestHandler(request, response, false, 'info')
     }
   )
 
@@ -140,18 +168,18 @@ export async function authenticatedRoutes(fastify: FastifyInstance) {
     {
       schema: {
         params: getObjectParamsSchema,
-        headers: { $ref: 'authSchema#' },
         summary,
-        description: 'use HEAD /object/authenticated/{bucketName} instead',
+        description: 'Object Info',
+        tags: ['object'],
         response: { '4xx': { $ref: 'errorSchema#' } },
-        tags: ['deprecated'],
       },
       config: {
         operation: { type: 'object.get_authenticated_info' },
+        allowInvalidJwt: true,
       },
     },
     async (request, response) => {
-      return requestHandler(request, response)
+      return requestHandler(request, response, false, 'info')
     }
   )
 
@@ -160,14 +188,14 @@ export async function authenticatedRoutes(fastify: FastifyInstance) {
     {
       schema: {
         params: getObjectParamsSchema,
-        headers: { $ref: 'authSchema#' },
         summary,
-        description: 'use HEAD /object/authenticated/{bucketName} instead',
+        description: 'Head object info',
+        tags: ['object'],
         response: { '4xx': { $ref: 'errorSchema#' } },
-        tags: ['deprecated'],
       },
       config: {
         operation: { type: 'object.head_authenticated_info' },
+        allowInvalidJwt: true,
       },
     },
     async (request, response) => {
